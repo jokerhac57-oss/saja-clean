@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +28,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SpeechRecognizer recognizer;
     private TextToSpeech tts;
+    private AudioManager audio;
     private boolean running = false;
     private boolean ttsReady = false;
 
@@ -43,6 +45,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
         } else {
             startForeground(1, note);
         }
+        audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0);
         tts = new TextToSpeech(this, this);
         recognizer = SpeechRecognizer.createSpeechRecognizer(this);
         recognizer.setRecognitionListener(this);
@@ -152,6 +156,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         handler.removeCallbacksAndMessages(null);
         if (recognizer != null) recognizer.destroy();
         if (tts != null) tts.shutdown();
+        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0);
         super.onDestroy();
     }
 
@@ -160,3 +165,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
+    
