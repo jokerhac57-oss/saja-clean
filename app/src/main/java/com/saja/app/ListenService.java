@@ -46,7 +46,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
             startForeground(1, note);
         }
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
-        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0);
         tts = new TextToSpeech(this, this);
         recognizer = SpeechRecognizer.createSpeechRecognizer(this);
         recognizer.setRecognitionListener(this);
@@ -70,8 +69,19 @@ public class ListenService extends Service implements RecognitionListener, TextT
         getSystemService(NotificationManager.class).notify(1, buildNote(text));
     }
 
+    private void beepOff() {
+        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0);
+        audio.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0);
+    }
+
+    private void beepOn() {
+        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0);
+        audio.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0);
+    }
+
     private void listen() {
         if (!running) return;
+        beepOff();
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
@@ -114,6 +124,11 @@ public class ListenService extends Service implements RecognitionListener, TextT
     }
 
     @Override
+    public void onReadyForSpeech(Bundle params) {
+        handler.postDelayed(this::beepOn, 400);
+    }
+
+    @Override
     public void onResults(Bundle results) {
         ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         handleText(matches == null || matches.isEmpty() ? "" : matches.get(0));
@@ -121,6 +136,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     @Override
     public void onError(int error) {
+        beepOn();
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             running = false;
             showText("Microphone permission needed. Open SAJA and allow it.");
@@ -137,7 +153,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
-    @Override public void onReadyForSpeech(Bundle params) {}
     @Override public void onBeginningOfSpeech() {}
     @Override public void onRmsChanged(float rmsdB) {}
     @Override public void onBufferReceived(byte[] buffer) {}
@@ -156,7 +171,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         handler.removeCallbacksAndMessages(null);
         if (recognizer != null) recognizer.destroy();
         if (tts != null) tts.shutdown();
-        audio.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0);
+        beepOn();
         super.onDestroy();
     }
 
@@ -165,4 +180,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-    
+        
