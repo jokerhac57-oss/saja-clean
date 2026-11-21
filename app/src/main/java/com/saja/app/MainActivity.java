@@ -8,8 +8,15 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
     private static final int REQ = 1;
@@ -37,7 +44,30 @@ public class MainActivity extends Activity {
         stop.setOnClickListener(v -> stopService(new Intent(this, ListenService.class)));
         box.addView(stop);
 
+        EditText keyBox = new EditText(this);
+        keyBox.setHint("Paste your OpenRouter key");
+        keyBox.setSingleLine(true);
+        box.addView(keyBox);
+
+        Button save = new Button(this);
+        save.setText("SAVE API KEY");
+        save.setOnClickListener(v -> saveKey(keyBox.getText().toString().trim()));
+        box.addView(save);
+
         setContentView(box);
+    }
+
+    private void saveKey(String key) {
+        if (key.isEmpty()) {
+            Toast.makeText(this, "Paste the key first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try (FileOutputStream out = new FileOutputStream(new File(getFilesDir(), "openrouter.key"))) {
+            out.write(key.getBytes(StandardCharsets.UTF_8));
+            Toast.makeText(this, "Key saved on this phone", Toast.LENGTH_SHORT).show();
+        } catch (IOException e) {
+            Toast.makeText(this, "Could not save the key", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void askThenStart() {
