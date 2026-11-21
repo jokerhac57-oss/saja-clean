@@ -17,7 +17,9 @@ import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Locale;
 
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
@@ -68,7 +70,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (!running) return;
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+        i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
         recognizer.startListening(i);
     }
 
@@ -80,13 +82,24 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (ttsReady) tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "saja");
     }
 
+    private String answerFor(String command) {
+        if (command.isEmpty()) return "Yes, I am here.";
+        if (command.contains("time")) {
+            return "It is " + new SimpleDateFormat("h mm a", Locale.US).format(new Date()) + ".";
+        }
+        if (command.contains("date") || command.contains("day")) {
+            return "Today is " + new SimpleDateFormat("EEEE, MMMM d", Locale.US).format(new Date()) + ".";
+        }
+        return "I heard " + command + ". I cannot answer that yet.";
+    }
+
     private void handleText(String heard) {
-        String lower = heard.toLowerCase(Locale.US);
+        String lower = heard.toLowerCase(Locale.US).trim();
         for (String w : WAKE_WORDS) {
             int at = lower.indexOf(w);
             if (at >= 0) {
                 String command = lower.substring(at + w.length()).trim();
-                String reply = command.isEmpty() ? "Yes, I am here." : "You said " + command + ".";
+                String reply = answerFor(command);
                 showText(reply);
                 speak(reply);
                 restartSoon(3000);
@@ -99,7 +112,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     @Override
     public void onResults(Bundle results) {
         ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-        handleText(matches == null ? "" : String.join(" ", matches));
+        handleText(matches == null || matches.isEmpty() ? "" : matches.get(0));
     }
 
     @Override
