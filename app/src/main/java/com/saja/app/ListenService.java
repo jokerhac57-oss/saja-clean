@@ -662,7 +662,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     }
 
     private boolean notificationAccessOn() {
-        String enabled = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_NOTIFICATION_LISTENERS);
+        String enabled = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
         return enabled != null && enabled.contains(getPackageName());
     }
 
@@ -1189,6 +1189,3 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-                                
-
-                            
