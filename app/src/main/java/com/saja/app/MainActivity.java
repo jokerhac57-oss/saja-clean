@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -29,6 +30,11 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private static final int REQ_START = 1;
     private static final int REQ_CONTACTS = 2;
+    private static final int REQ_LOCATION = 3;
+    private static final int REQ_CALENDAR = 4;
+    private static final int CYAN = 0xFF00E5FF;
+    private static final int PANEL = 0xFF0B1A24;
+    private static final int BLACK = 0xFF05070A;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,11 +42,16 @@ public class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
+        box.setBackgroundColor(BLACK);
         box.setPadding(60, 200, 60, 60);
 
         TextView title = new TextView(this);
-        title.setText("SAJA is running");
-        title.setTextSize(28);
+        title.setText("S A J A");
+        title.setTextSize(30);
+        title.setTextColor(CYAN);
+        title.setGravity(Gravity.CENTER);
+        title.setShadowLayer(18f, 0f, 0f, CYAN);
+        title.setPadding(0, 0, 0, 40);
         box.addView(title);
 
         box.addView(button("START LISTENING", v -> askThenStart()));
@@ -56,6 +67,9 @@ public class MainActivity extends Activity {
 
         box.addView(button("TAKE PHOTO", v -> takePhoto()));
         box.addView(button("ALLOW CONTACTS", v -> requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQ_CONTACTS)));
+        box.addView(button("ALLOW LOCATION (HOME WI-FI)", v -> requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION)));
+        box.addView(button("ALLOW CALENDAR", v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CALENDAR)));
+        box.addView(button("NOTIFICATION ACCESS", v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
 
         setContentView(box);
     }
@@ -63,6 +77,8 @@ public class MainActivity extends Activity {
     private Button button(String text, View.OnClickListener listener) {
         Button b = new Button(this);
         b.setText(text);
+        b.setTextColor(CYAN);
+        b.setBackgroundColor(PANEL);
         b.setOnClickListener(listener);
         return b;
     }
@@ -70,6 +86,8 @@ public class MainActivity extends Activity {
     private EditText input(String hint) {
         EditText e = new EditText(this);
         e.setHint(hint);
+        e.setHintTextColor(0xFF4A7A8C);
+        e.setTextColor(CYAN);
         e.setSingleLine(true);
         return e;
     }
@@ -139,6 +157,12 @@ public class MainActivity extends Activity {
         }
         if (requestCode == REQ_CONTACTS) {
             Toast.makeText(this, granted ? "Contacts allowed" : "Contacts not allowed", Toast.LENGTH_SHORT).show();
+        }
+        if (requestCode == REQ_LOCATION) {
+            Toast.makeText(this, granted ? "Location allowed" : "Location not allowed", Toast.LENGTH_SHORT).show();
+        }
+        if (requestCode == REQ_CALENDAR) {
+            Toast.makeText(this, granted ? "Calendar allowed" : "Calendar not allowed", Toast.LENGTH_SHORT).show();
         }
     }
 }
