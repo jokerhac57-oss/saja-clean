@@ -15,6 +15,8 @@ import android.database.Cursor;
 import android.hardware.camera2.CameraManager;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
@@ -23,7 +25,9 @@ import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.AlarmClock;
+import android.provider.CalendarContract;
 import android.provider.ContactsContract;
+import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
 import android.util.Base64;
 import android.view.KeyEvent;
@@ -52,6 +56,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -66,12 +71,13 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private static final String MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
     private static final String VISION_MODEL = "qwen/qwen3.8-27b";
     private static final String NO_CONTACTS = "#nocontacts";
+    private static final String HOME_FILE = "home_wifi.txt";
     private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
             "seventeen", "eighteen", "nineteen", "twenty"};
     private static final String[] SAFE_STEPS = {"time", "date", "battery", "status", "flashlight on",
             "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders",
-            "weather", "music ", "volume "};
+            "weather", "music ", "volume ", "directions to ", "calendar", "notifications"};
     private static final Map<String, String> APPS = new HashMap<>();
 
     static {
@@ -96,6 +102,15 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private boolean ttsReady = false;
     private Runnable pendingYes = null;
     private long pendingSince = 0;
+    private boolean wasHome = false;
+
+    private final Runnable homeCheck = new Runnable() {
+        @Override
+        public void run() {
+            checkHome();
+            handler.postDelayed(this, 60000);
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -117,6 +132,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
                     startRecognition();
                 },
                 (e) -> showText("Speech model failed: " + e.getMessage()));
+        handler.postDelayed(homeCheck, 60000);
     }
 
     private void startRecognition() {
@@ -340,14 +356,15 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
         if (steps.isEmpty()) return "Say at least one step.";
         if (steps.size() > 6) return "A routine can have up to six steps.";
-        String line = name + "|" + String.join(" || ", steps);
+        final String line = name + "|" + String.join(" || ", steps);
+        final String routineName = name;
         askApproval("Save the routine " + name + " with " + steps.size() + " steps?", () -> {
             try {
                 List<String> all = readLines(routinesFile());
-                all.removeIf(l -> l.startsWith(name + "|"));
+                all.removeIf(l -> l.startsWith(routineName + "|"));
                 all.add(line);
                 writeLines(routinesFile(), all);
-                reply("Routine " + name + " saved.");
+                reply("Routine " + routineName + " saved.");
             } catch (IOException e) {
                 reply("I could not save the routine.");
             }
@@ -397,6 +414,53 @@ public class ListenService extends Service implements RecognitionListener, TextT
         String result = answerFor(steps[index].trim());
         if (result != null) reply(result);
         handler.postDelayed(() -> runStep(name, steps, index + 1), 2500);
+    }
+
+    private String currentSsid() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return "";
+        }
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            WifiInfo info = wm.getConnectionInfo();
+            String s = info == null || info.getSSID() == null ? "" : info.getSSID();
+            s = s.replace("\"", "");
+            return s.equals("<unknown ssid>") ? "" : s;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void checkHome() {
+        String home = readFileText(HOME_FILE);
+        if (home.isEmpty()) {
+            wasHome = false;
+            return;
+        }
+        String current = currentSsid();
+        boolean isHome = !current.isEmpty() && current.equals(home);
+        if (isHome && !wasHome) {
+            String steps = findRoutineSteps("home");
+            if (steps != null) runRoutine("home", steps.split(" \\|\\| "));
+        }
+        wasHome = isHome;
+    }
+
+    private String setHomeWifi() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return "Allow location in the SAJA app first, so I can read the Wi-Fi name.";
+        }
+        final String ssid = currentSsid();
+        if (ssid.isEmpty()) return "Connect to your home Wi-Fi first, then say set home wifi.";
+        askApproval("Use the Wi-Fi " + ssid + " as your home Wi-Fi?", () -> {
+            try {
+                writeLines(new File(getFilesDir(), HOME_FILE), Arrays.asList(ssid));
+                reply("Home Wi-Fi saved.");
+            } catch (IOException e) {
+                reply("I could not save the home Wi-Fi.");
+            }
+        });
+        return null;
     }
 
     private String batteryText() {
@@ -530,6 +594,91 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
+    private String navigate(String target) {
+        if (target.isEmpty()) return "Say directions to, then the place.";
+        Intent nav = new Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(target)));
+        nav.setPackage("com.google.android.apps.maps");
+        nav.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(nav);
+            return "Starting directions to " + target + ".";
+        } catch (ActivityNotFoundException e) {
+            Intent geo = new Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(target)));
+            geo.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(geo);
+                return "Opening directions to " + target + ".";
+            } catch (ActivityNotFoundException e2) {
+                return "No maps app found.";
+            }
+        }
+    }
+
+    private String todayEvents() {
+        if (checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            return "Allow calendar in the SAJA app first.";
+        }
+        Calendar cal = Calendar.getInstance();
+        cal.set(Calendar.HOUR_OF_DAY, 0);
+        cal.set(Calendar.MINUTE, 0);
+        cal.set(Calendar.SECOND, 0);
+        cal.set(Calendar.MILLISECOND, 0);
+        long begin = cal.getTimeInMillis();
+        long end = begin + 86400000L;
+        List<String> items = new ArrayList<>();
+        try (Cursor c = CalendarContract.Instances.query(getContentResolver(),
+                new String[]{CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN}, begin, end)) {
+            if (c == null) return "I could not read the calendar.";
+            while (c.moveToNext()) {
+                String title = c.getString(0);
+                long when = c.getLong(1);
+                items.add(new SimpleDateFormat("h:mm a", Locale.US).format(new Date(when))
+                        + " " + (title == null ? "Untitled" : title));
+            }
+        } catch (Exception e) {
+            return "I could not read the calendar.";
+        }
+        if (items.isEmpty()) return "You have nothing on your calendar today.";
+        return "Today you have. " + String.join(". ", items) + ".";
+    }
+
+    private String addEvent(String title) {
+        if (title.isEmpty()) return "Say add event, then the title.";
+        final String t = title;
+        askApproval("Open the calendar to add " + t + "?", () -> {
+            Intent i = new Intent(Intent.ACTION_INSERT)
+                    .setData(CalendarContract.Events.CONTENT_URI)
+                    .putExtra(CalendarContract.Events.TITLE, t)
+                    .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, System.currentTimeMillis() + 3600000L)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(i);
+                reply("The calendar is open. Tap save.");
+            } catch (ActivityNotFoundException e) {
+                reply("No calendar app found.");
+            }
+        });
+        return null;
+    }
+
+    private boolean notificationAccessOn() {
+        String enabled = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_NOTIFICATION_LISTENERS);
+        return enabled != null && enabled.contains(getPackageName());
+    }
+
+    private String readNotifications() {
+        if (!notificationAccessOn()) {
+            return "Turn on notification access for SAJA first. Open the SAJA app and tap NOTIFICATION ACCESS.";
+        }
+        List<String> items = new ArrayList<>(NotificationReader.RECENT);
+        if (items.isEmpty()) return "You have no new notifications.";
+        StringBuilder sb = new StringBuilder("Your recent notifications. ");
+        for (int i = Math.max(0, items.size() - 5); i < items.size(); i++) {
+            sb.append(items.get(i)).append(". ");
+        }
+        return sb.toString();
+    }
+
     private void sendMediaKey(int action, int keyCode) {
         Intent i = new Intent(Intent.ACTION_MEDIA_BUTTON);
         i.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(action, keyCode));
@@ -639,10 +788,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
         reply(question + " Say yes or no.");
     }
 
-    private JSONArray textMessages(String prompt) throws Exception {
-        return new JSONArray().put(new JSONObject().put("role", "user").put("content", prompt));
-    }
-
     private String callOpenRouter(String modelName, JSONArray messages) {
         String key = readFileText("openrouter.key");
         if (key.isEmpty()) return "Save your OpenRouter key in the SAJA app first.";
@@ -676,7 +821,9 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private String callModel(String prompt) {
         try {
-            return callOpenRouter(MODEL, textMessages(prompt));
+            JSONArray messages = new JSONArray()
+                    .put(new JSONObject().put("role", "user").put("content", prompt));
+            return callOpenRouter(MODEL, messages);
         } catch (Exception e) {
             return "The model request failed: " + e.getMessage();
         }
@@ -746,7 +893,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         new Thread(() -> {
             try {
                 Uri uri = Uri.parse(readFileText("photo_uri.txt"));
-                byte[] bytes = new byte[0];
+                byte[] bytes;
                 try (InputStream in = getContentResolver().openInputStream(uri)) {
                     if (in == null) {
                         replyLater("I could not open the photo.");
@@ -790,6 +937,11 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (command.startsWith("delete routine ")) return deleteRoutine(command.substring(15).trim());
         if (command.equals("routines") || command.equals("routine")) return listRoutines();
 
+        if (command.startsWith("when i get home do ")) {
+            return makeRoutine("home", command.substring(19).trim());
+        }
+        if (command.equals("set home wifi") || command.equals("set home")) return setHomeWifi();
+
         if (command.startsWith("forget")) {
             askApproval("Delete everything I remember?", this::clearMemory);
             return null;
@@ -797,6 +949,10 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (command.startsWith("remember ")) return rememberFact(command.substring(9).trim());
         if (command.equals("memory") || command.contains("what do you remember") || command.contains("do you remember")) {
             return readMemory();
+        }
+
+        if (command.equals("notifications") || (command.startsWith("read") && command.contains("notification"))) {
+            return readNotifications();
         }
 
         if (command.startsWith("ask ") || command.startsWith("question ")) {
@@ -888,6 +1044,15 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (command.contains("github") || command.contains("repos")) {
             githubAsync();
             return null;
+        }
+
+        if (command.startsWith("add event ")) return addEvent(command.substring(10).trim());
+        if (command.startsWith("directions to ") || command.startsWith("navigate to ")) {
+            return navigate(command.replaceFirst("^(directions|navigate) to ", "").trim());
+        }
+        if (command.equals("calendar") || command.contains("calendar") || command.contains("agenda")
+                || command.contains("what's on") || command.contains("whats on")) {
+            return todayEvents();
         }
 
         if (command.startsWith("remind ")) return remindCmd(command);
@@ -1024,3 +1189,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
+                                
+
+                            
