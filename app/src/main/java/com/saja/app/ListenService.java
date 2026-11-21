@@ -7,7 +7,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
-import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -28,11 +27,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SpeechRecognizer recognizer;
     private TextToSpeech tts;
-    private AudioManager audio;
     private boolean running = false;
     private boolean ttsReady = false;
-    private int savedSystem = -1;
-    private int savedNotif = -1;
 
     @Override
     public void onCreate() {
@@ -47,8 +43,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
         } else {
             startForeground(1, note);
         }
-        audio = (AudioManager) getSystemService(AUDIO_SERVICE);
-        muteBeep();
         tts = new TextToSpeech(this, this);
         recognizer = SpeechRecognizer.createSpeechRecognizer(this);
         recognizer.setRecognitionListener(this);
@@ -72,27 +66,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
         getSystemService(NotificationManager.class).notify(1, buildNote(text));
     }
 
-    private void muteBeep() {
-        if (savedSystem < 0) savedSystem = audio.getStreamVolume(AudioManager.STREAM_SYSTEM);
-        if (savedNotif < 0) savedNotif = audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION);
-        audio.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, 0);
-        audio.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, 0);
-    }
-
-    private void restoreBeep() {
-        if (savedSystem >= 0) {
-            audio.setStreamVolume(AudioManager.STREAM_SYSTEM, savedSystem, 0);
-            savedSystem = -1;
-        }
-        if (savedNotif >= 0) {
-            audio.setStreamVolume(AudioManager.STREAM_NOTIFICATION, savedNotif, 0);
-            savedNotif = -1;
-        }
-    }
-
     private void listen() {
         if (!running) return;
-        muteBeep();
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
@@ -177,7 +152,6 @@ public class ListenService extends Service implements RecognitionListener, TextT
         handler.removeCallbacksAndMessages(null);
         if (recognizer != null) recognizer.destroy();
         if (tts != null) tts.shutdown();
-        restoreBeep();
         super.onDestroy();
     }
 
@@ -186,5 +160,3 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-
-            
