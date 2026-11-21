@@ -1,4 +1,4 @@
-package com.saja.app;
+ package com.saja.app;
 
 import android.Manifest;
 import android.app.Notification;
@@ -71,7 +71,11 @@ import java.util.regex.Pattern;
 
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
     private static final String[] WAKE_WORDS = {"jarvis", "jarvus", "javis"};
-    private static final String MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+    private static final String[] FREE_MODELS = {
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "openai/gpt-oss-20b:free",
+            "meta-llama/llama-3.3-70b-instruct:free"
+    };
     private static final String VISION_MODEL = "qwen/qwen3.8-27b";
     private static final String NO_CONTACTS = "#nocontacts";
     private static final String HOME_FILE = "home_wifi.txt";
@@ -930,14 +934,33 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
-    private String callModel(String prompt) {
-        try {
-            JSONArray messages = new JSONArray()
-                    .put(new JSONObject().put("role", "user").put("content", prompt));
-            return callOpenRouter(MODEL, messages);
-        } catch (Exception e) {
-            return "The model request failed: " + e.getMessage();
+    private String callModelWithFailover(String prompt) {
+        String last = "No reply.";
+        for (String m : FREE_MODELS) {
+            try {
+                JSONArray messages = new JSONArray()
+                        .put(new JSONObject().put("role", "user").put("content", prompt));
+                String answer = callOpenRouter(m, messages);
+                boolean failed = answer.startsWith("Model error") || answer.startsWith("The model request failed");
+                if (answer.startsWith("Save your")) return answer;
+                if (!failed) {
+                    try {
+                        ChatHistory.countUse(this);
+                    } catch (IOException e) {
+                        // counting is optional
+                    }
+                    return answer;
+                }
+                last = answer;
+            } catch (Exception e) {
+                last = "The model request failed: " + e.getMessage();
+            }
         }
+        return last + " I tried all the free models.";
+    }
+
+    private String callModel(String prompt) {
+        return callModelWithFailover(prompt);
     }
 
     private void runModel(String prompt) {
@@ -945,7 +968,13 @@ public class ListenService extends Service implements RecognitionListener, TextT
         new Thread(() -> {
             String answer = callModel(prompt);
             answer = answer.replace("*", "").replace("#", "").trim();
-            replyLater(answer.isEmpty() ? "No reply." : answer);
+            if (answer.isEmpty()) answer = "No reply.";
+            try {
+                ChatHistory.save(this, prompt, answer);
+            } catch (IOException e) {
+                // saving history is optional
+            }
+            replyLater(answer);
         }).start();
     }
 
@@ -1127,6 +1156,25 @@ public class ListenService extends Service implements RecognitionListener, TextT
                 runModel("Summarize what is on this phone screen in three short sentences:\n\n" + screen);
             });
             return null;
+        }
+
+        if (command.equals("usage") || command.equals("how many questions")) {
+            return ChatHistory.usageText(this);
+        }
+        if (command.equals("models")) {
+            StringBuilder sb = new StringBuilder("I try these free models in order. ");
+            for (String m : FREE_MODELS) sb.append(m).append(". ");
+            return sb.toString();
+        }
+        if (command.startsWith("search history ")) {
+            return ChatHistory.search(this, command.substring(15).trim());
+        }
+        if (command.equals("export history")) {
+            try {
+                return "History exported to " + ChatHistory.export(this) + ".";
+            } catch (IOException e) {
+                return "I could not export the history.";
+            }
         }
 
         String routineSteps = findRoutineSteps(command);
