@@ -59,6 +59,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
             "seventeen", "eighteen", "nineteen", "twenty"};
+    private static final String[] SAFE_STEPS = {"time", "date", "battery", "status", "flashlight on",
+            "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders"};
     private static final Map<String, String> APPS = new HashMap<>();
 
     static {
@@ -81,8 +83,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private SpeechService speechService;
     private TextToSpeech tts;
     private boolean ttsReady = false;
-    private String pendingPrompt = null;
-    private String pendingLabel = null;
+    private Runnable pendingYes = null;
     private long pendingSince = 0;
 
     @Override
@@ -151,13 +152,28 @@ public class ListenService extends Service implements RecognitionListener, TextT
         speak(text);
     }
 
+    private void replyLater(String text) {
+        handler.post(() -> reply(text));
+    }
+
+    private String now() {
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+    }
+
     private File notesFile() {
         return new File(getFilesDir(), "notes.txt");
     }
 
-    private List<String> readAllLines() {
+    private File memoryFile() {
+        return new File(getFilesDir(), "memory.txt");
+    }
+
+    private File routinesFile() {
+        return new File(getFilesDir(), "routines.txt");
+    }
+
+    private List<String> readLines(File f) {
         List<String> lines = new ArrayList<>();
-        File f = notesFile();
         if (!f.exists()) return lines;
         try (BufferedReader r = new BufferedReader(new FileReader(f))) {
             String line;
@@ -170,10 +186,22 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return lines;
     }
 
+    private void writeLines(File f, List<String> lines) throws IOException {
+        try (PrintWriter w = new PrintWriter(new FileWriter(f))) {
+            for (String l : lines) w.println(l);
+        }
+    }
+
+    private void appendLine(File f, String line) throws IOException {
+        try (FileWriter w = new FileWriter(f, true)) {
+            w.write(line + "\n");
+        }
+    }
+
     private String saveNote(String text) {
         if (text.isEmpty()) return "Say note, then what to save.";
-        try (FileWriter w = new FileWriter(notesFile(), true)) {
-            w.write(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()) + "|" + text + "\n");
+        try {
+            appendLine(notesFile(), now() + "|" + text);
             return "Note saved.";
         } catch (IOException e) {
             return "I could not save the note.";
@@ -181,7 +209,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     }
 
     private String readNotes() {
-        List<String> lines = readAllLines();
+        List<String> lines = readLines(notesFile());
         if (lines.isEmpty()) return "You have no notes yet.";
         StringBuilder sb = new StringBuilder("Your last notes are. ");
         for (int i = Math.max(0, lines.size() - 5); i < lines.size(); i++) {
@@ -192,15 +220,137 @@ public class ListenService extends Service implements RecognitionListener, TextT
     }
 
     private String deleteLastNote() {
-        List<String> lines = readAllLines();
+        List<String> lines = readLines(notesFile());
         if (lines.isEmpty()) return "There are no notes to delete.";
         lines.remove(lines.size() - 1);
-        try (PrintWriter w = new PrintWriter(new FileWriter(notesFile()))) {
-            for (String l : lines) w.println(l);
+        try {
+            writeLines(notesFile(), lines);
         } catch (IOException e) {
             return "I could not delete the note.";
         }
         return "Last note deleted.";
+    }
+
+    private String rememberFact(String fact) {
+        if (fact.isEmpty()) return "Say remember, then what to remember.";
+        try {
+            appendLine(memoryFile(), now() + "|" + fact);
+            return "Got it. I will remember that.";
+        } catch (IOException e) {
+            return "I could not save that.";
+        }
+    }
+
+    private String readMemory() {
+        List<String> lines = readLines(memoryFile());
+        if (lines.isEmpty()) return "I do not remember anything yet.";
+        StringBuilder sb = new StringBuilder("I remember. ");
+        for (int i = Math.max(0, lines.size() - 10); i < lines.size(); i++) {
+            String[] parts = lines.get(i).split("\\|", 2);
+            sb.append(parts.length == 2 ? parts[1] : lines.get(i)).append(". ");
+        }
+        return sb.toString();
+    }
+
+    private String memoryContext() {
+        List<String> lines = readLines(memoryFile());
+        if (lines.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("Facts the user asked you to remember: ");
+        for (String line : lines) {
+            String[] parts = line.split("\\|", 2);
+            sb.append(parts.length == 2 ? parts[1] : line).append("; ");
+        }
+        return sb.toString().trim() + "\n\n";
+    }
+
+    private void clearMemory() {
+        try {
+            writeLines(memoryFile(), new ArrayList<>());
+            reply("Memory cleared.");
+        } catch (IOException e) {
+            reply("I could not clear memory.");
+        }
+    }
+
+    private boolean isSafeStep(String step) {
+        if (step.contains("ask ") || step.startsWith("routine") || step.startsWith("make ")
+                || step.startsWith("delete ") || step.startsWith("read ")) {
+            return false;
+        }
+        for (String s : SAFE_STEPS) {
+            if (step.startsWith(s)) return true;
+        }
+        return false;
+    }
+
+    private String makeRoutine(String name, String stepsText) {
+        if (name.isEmpty() || name.contains("|")) return "Say make routine, then a name, then do, then the steps.";
+        List<String> steps = new ArrayList<>();
+        for (String s : stepsText.split(" then ")) {
+            String t = s.trim();
+            if (t.isEmpty()) continue;
+            if (!isSafeStep(t)) return "The step " + t + " cannot be used in a routine.";
+            steps.add(t);
+        }
+        if (steps.isEmpty()) return "Say at least one step.";
+        if (steps.size() > 6) return "A routine can have up to six steps.";
+        String line = name + "|" + String.join(" || ", steps);
+        askApproval("Save the routine " + name + " with " + steps.size() + " steps?", () -> {
+            try {
+                List<String> all = readLines(routinesFile());
+                all.removeIf(l -> l.startsWith(name + "|"));
+                all.add(line);
+                writeLines(routinesFile(), all);
+                reply("Routine " + name + " saved.");
+            } catch (IOException e) {
+                reply("I could not save the routine.");
+            }
+        });
+        return null;
+    }
+
+    private String deleteRoutine(String name) {
+        askApproval("Delete the routine " + name + "?", () -> {
+            try {
+                List<String> all = readLines(routinesFile());
+                all.removeIf(l -> l.startsWith(name + "|"));
+                writeLines(routinesFile(), all);
+                reply("Routine " + name + " deleted.");
+            } catch (IOException e) {
+                reply("I could not delete the routine.");
+            }
+        });
+        return null;
+    }
+
+    private String listRoutines() {
+        List<String> all = readLines(routinesFile());
+        if (all.isEmpty()) return "You have no routines yet.";
+        StringBuilder sb = new StringBuilder("Your routines are. ");
+        for (String l : all) sb.append(l.split("\\|", 2)[0]).append(". ");
+        return sb.toString();
+    }
+
+    private String findRoutineSteps(String name) {
+        for (String l : readLines(routinesFile())) {
+            String[] parts = l.split("\\|", 2);
+            if (parts.length == 2 && parts[0].equals(name)) return parts[1];
+        }
+        return null;
+    }
+
+    private void runRoutine(String name, String[] steps) {
+        runStep(name, steps, 0);
+    }
+
+    private void runStep(String name, String[] steps, int index) {
+        if (index >= steps.length) {
+            replyLater("Routine " + name + " finished.");
+            return;
+        }
+        String result = answerFor(steps[index].trim());
+        if (result != null) reply(result);
+        handler.postDelayed(() -> runStep(name, steps, index + 1), 2500);
     }
 
     private String batteryText() {
@@ -334,11 +484,10 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
-    private void askApproval(String prompt, String label) {
-        pendingPrompt = prompt;
-        pendingLabel = label;
+    private void askApproval(String question, Runnable onYes) {
+        pendingYes = onYes;
         pendingSince = System.currentTimeMillis();
-        reply("Send this " + label + " to the model? Say yes or no.");
+        reply(question + " Say yes or no.");
     }
 
     private String readKey() {
@@ -362,76 +511,153 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return sb.toString();
     }
 
-    private void runModel(String prompt) {
+    private String callModel(String prompt) {
         String key = readKey();
-        if (key.isEmpty()) {
-            reply("Save your OpenRouter key in the SAJA app first.");
-            return;
-        }
-        showText("Asking the model...");
-        new Thread(() -> {
-            String answer;
-            try {
-                JSONObject body = new JSONObject();
-                body.put("model", MODEL);
-                body.put("max_tokens", 600);
-                JSONObject message = new JSONObject();
-                message.put("role", "user");
-                message.put("content", prompt);
-                body.put("messages", new JSONArray().put(message));
+        if (key.isEmpty()) return "Save your OpenRouter key in the SAJA app first.";
+        try {
+            JSONObject body = new JSONObject();
+            body.put("model", MODEL);
+            body.put("max_tokens", 600);
+            JSONObject message = new JSONObject();
+            message.put("role", "user");
+            message.put("content", prompt);
+            body.put("messages", new JSONArray().put(message));
 
-                HttpURLConnection c = (HttpURLConnection) new URL("https://openrouter.ai/api/v1/chat/completions").openConnection();
-                c.setRequestMethod("POST");
-                c.setRequestProperty("Content-Type", "application/json");
-                c.setRequestProperty("Authorization", "Bearer " + key);
-                c.setConnectTimeout(20000);
-                c.setReadTimeout(150000);
-                c.setDoOutput(true);
-                try (OutputStream os = c.getOutputStream()) {
-                    os.write(body.toString().getBytes(StandardCharsets.UTF_8));
-                }
-                int code = c.getResponseCode();
-                String raw = readStream(code >= 400 ? c.getErrorStream() : c.getInputStream());
-                if (code >= 400) {
-                    answer = "Model error " + code + ". " + raw.substring(0, Math.min(200, raw.length()));
-                } else {
-                    answer = new JSONObject(raw).getJSONArray("choices").getJSONObject(0)
-                            .getJSONObject("message").getString("content");
-                }
-            } catch (Exception e) {
-                answer = "The model request failed: " + e.getMessage();
+            HttpURLConnection c = (HttpURLConnection) new URL("https://openrouter.ai/api/v1/chat/completions").openConnection();
+            c.setRequestMethod("POST");
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setConnectTimeout(20000);
+            c.setReadTimeout(150000);
+            c.setDoOutput(true);
+            try (OutputStream os = c.getOutputStream()) {
+                os.write(body.toString().getBytes(StandardCharsets.UTF_8));
             }
+            int code = c.getResponseCode();
+            String raw = readStream(code >= 400 ? c.getErrorStream() : c.getInputStream());
+            if (code >= 400) {
+                return "Model error " + code + ". " + raw.substring(0, Math.min(200, raw.length()));
+            }
+            return new JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content");
+        } catch (Exception e) {
+            return "The model request failed: " + e.getMessage();
+        }
+    }
+
+    private void runModel(String prompt) {
+        handler.post(() -> showText("Asking the model..."));
+        new Thread(() -> {
+            String answer = callModel(prompt);
             answer = answer.replace("*", "").replace("#", "").trim();
-            reply(answer.isEmpty() ? "No reply." : answer);
+            replyLater(answer.isEmpty() ? "No reply." : answer);
+        }).start();
+    }
+
+    private String fetchText(String url) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) SAJA");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(30000);
+        int code = c.getResponseCode();
+        if (code >= 400) throw new IOException("the site returned " + code);
+        StringBuilder raw = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null && raw.length() < 300000) {
+                raw.append(line).append('\n');
+            }
+        }
+        String text = raw.toString()
+                .replaceAll("(?is)<script.*?</script>", " ")
+                .replaceAll("(?is)<style.*?</style>", " ")
+                .replaceAll("(?s)<[^>]+>", " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return text.length() > 6000 ? text.substring(0, 6000) : text;
+    }
+
+    private void summarizeSite(String url) {
+        handler.post(() -> showText("Reading the page..."));
+        new Thread(() -> {
+            String text = "";
+            try {
+                text = fetchText(url);
+            } catch (Exception e) {
+                replyLater("I could not read that page: " + e.getMessage());
+                return;
+            }
+            if (text.isEmpty()) {
+                replyLater("That page had no readable text.");
+                return;
+            }
+            String answer = callModel("Summarize this web page in four short sentences:\n\n" + text);
+            replyLater(answer.replace("*", "").replace("#", "").trim());
         }).start();
     }
 
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
+
+        String routineSteps = findRoutineSteps(command);
+        if (routineSteps != null) {
+            runRoutine(command, routineSteps.split(" \\|\\| "));
+            return null;
+        }
+        Matcher mk = Pattern.compile("make routine (.+?) do (.+)").matcher(command);
+        if (mk.find()) return makeRoutine(mk.group(1).trim(), mk.group(2).trim());
+        if (command.startsWith("delete routine ")) return deleteRoutine(command.substring(15).trim());
+        if (command.equals("routines") || command.equals("routine")) return listRoutines();
+
+        if (command.startsWith("forget")) {
+            askApproval("Delete everything I remember?", this::clearMemory);
+            return null;
+        }
+        if (command.startsWith("remember ")) return rememberFact(command.substring(9).trim());
+        if (command.equals("memory") || command.contains("what do you remember") || command.contains("do you remember")) {
+            return readMemory();
+        }
+
         if (command.startsWith("ask ") || command.startsWith("question ")) {
             String q = command.replaceFirst("^(ask|question) ", "").trim();
             if (q.isEmpty()) return "Say ask, then your question.";
-            askApproval(q, "question");
+            String prompt = memoryContext() + q;
+            askApproval("Send this question to the model?", () -> runModel(prompt));
             return null;
         }
         if (command.startsWith("translate")) {
             Matcher tm = Pattern.compile("translate (.+?) to (\\w+)").matcher(command);
             if (!tm.find()) return "Say translate, then the words, then to, then the language.";
-            askApproval("Translate this into " + tm.group(2) + ". Reply with only the translation: " + tm.group(1), "translation");
+            String prompt = "Translate this into " + tm.group(2) + ". Reply with only the translation: " + tm.group(1);
+            askApproval("Send this translation to the model?", () -> runModel(prompt));
             return null;
         }
         if (command.startsWith("define ")) {
-            askApproval("Define this word in two short plain sentences: " + command.substring(7).trim(), "definition");
+            String prompt = "Define this word in two short plain sentences: " + command.substring(7).trim();
+            askApproval("Send this definition request to the model?", () -> runModel(prompt));
             return null;
         }
         if (command.contains("joke")) {
-            askApproval("Tell one short clean joke in two lines, plain text.", "joke");
+            String prompt = "Tell one short clean joke in two lines, plain text.";
+            askApproval("Send the joke request to the model?", () -> runModel(prompt));
             return null;
         }
         if (command.contains("headlines")) {
-            askApproval("List three major news headlines from today in short plain sentences. If you are not sure they are current, say so first.", "headlines request");
+            String prompt = "List three major news headlines from today in short plain sentences. If you are not sure they are current, say so first.";
+            askApproval("Send the headlines request to the model?", () -> runModel(prompt));
             return null;
         }
+        if (command.startsWith("read ")) {
+            String target = command.substring(5).trim();
+            if (target.isEmpty()) return "Say read, then a website.";
+            String url = target.startsWith("http") ? target
+                    : "https://" + target.replace(" ", "") + (target.contains(".") ? "" : ".com");
+            askApproval("Read and summarize " + target + "? This sends the page text to the model.", () -> summarizeSite(url));
+            return null;
+        }
+
         if (command.startsWith("remind ")) return remindCmd(command);
         if (command.equals("reminders") || command.equals("reminder")) return readReminders();
         if (command.startsWith("timer")) return timerCmd(command);
@@ -475,23 +701,20 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private void handleText(String heard) {
         String lower = heard.toLowerCase(Locale.US).trim();
 
-        if (pendingPrompt != null) {
+        if (pendingYes != null) {
             long age = System.currentTimeMillis() - pendingSince;
             if (age > 30000) {
-                pendingPrompt = null;
-                pendingLabel = null;
+                pendingYes = null;
             } else if (age > 3000) {
                 List<String> tokens = Arrays.asList(lower.split("\\s+"));
                 if (tokens.contains("yes") || tokens.contains("yeah") || tokens.contains("sure")) {
-                    String prompt = pendingPrompt;
-                    pendingPrompt = null;
-                    pendingLabel = null;
-                    runModel(prompt);
+                    Runnable action = pendingYes;
+                    pendingYes = null;
+                    action.run();
                     return;
                 }
                 if (tokens.contains("no") || tokens.contains("nope") || tokens.contains("cancel")) {
-                    pendingPrompt = null;
-                    pendingLabel = null;
+                    pendingYes = null;
                     reply("Cancelled.");
                     return;
                 }
@@ -501,8 +724,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         for (String w : WAKE_WORDS) {
             int at = lower.indexOf(w);
             if (at >= 0) {
-                pendingPrompt = null;
-                pendingLabel = null;
+                pendingYes = null;
                 String command = lower.substring(at + w.length()).trim();
                 String result = answerFor(command);
                 if (result != null) reply(result);
@@ -570,3 +792,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
+                                
