@@ -1,4 +1,4 @@
-package com.saja.app;
+ package com.saja.app;
 
 import android.Manifest;
 import android.app.Activity;
@@ -32,9 +32,11 @@ public class MainActivity extends Activity {
     private static final int REQ_CONTACTS = 2;
     private static final int REQ_LOCATION = 3;
     private static final int REQ_CALENDAR = 4;
+    private static final int REQ_CAMERA = 5;
     private static final int CYAN = 0xFF00E5FF;
     private static final int PANEL = 0xFF0B1A24;
     private static final int BLACK = 0xFF05070A;
+    private String pendingLook = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,13 +67,19 @@ public class MainActivity extends Activity {
         box.addView(githubBox);
         box.addView(button("SAVE GITHUB TOKEN", v -> saveSecret("github.token", githubBox.getText().toString().trim(), "GitHub token")));
 
-        box.addView(button("TAKE PHOTO", v -> takePhoto()));
+        box.addView(button("TAKE PHOTO", v -> { pendingLook = null; launchCamera(); }));
         box.addView(button("ALLOW CONTACTS", v -> requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQ_CONTACTS)));
         box.addView(button("ALLOW LOCATION (HOME WI-FI)", v -> requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION)));
         box.addView(button("ALLOW CALENDAR", v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CALENDAR)));
         box.addView(button("NOTIFICATION ACCESS", v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
 
         setContentView(box);
+
+        String look = getIntent().getStringExtra("look");
+        if (look != null) {
+            pendingLook = look;
+            launchCamera();
+        }
     }
 
     private Button button(String text, View.OnClickListener listener) {
@@ -105,7 +113,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void takePhoto() {
+    private void launchCamera() {
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         ContentValues values = new ContentValues();
         values.put(MediaStore.Images.Media.DISPLAY_NAME, "SAJA_" + stamp + ".jpg");
@@ -125,10 +133,34 @@ public class MainActivity extends Activity {
         camera.putExtra(MediaStore.EXTRA_OUTPUT, uri);
         camera.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         try {
-            startActivity(camera);
+            startActivityForResult(camera, REQ_CAMERA);
         } catch (ActivityNotFoundException e) {
             Toast.makeText(this, "No camera app found", Toast.LENGTH_SHORT).show();
+            finish();
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_CAMERA) return;
+        if (resultCode == RESULT_OK && pendingLook != null) {
+            Intent svc = new Intent(this, ListenService.class)
+                    .setAction("com.saja.app.ASK_LOOK")
+                    .putExtra("q", pendingLook);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(svc);
+            } else {
+                startService(svc);
+            }
+            Toast.makeText(this, "Sending the photo to SAJA", Toast.LENGTH_SHORT).show();
+        } else if (resultCode != RESULT_OK) {
+            Toast.makeText(this, "No photo taken", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "Photo saved", Toast.LENGTH_SHORT).show();
+        }
+        pendingLook = null;
+        if (getIntent().getStringExtra("look") != null) finish();
     }
 
     private void askThenStart() {
