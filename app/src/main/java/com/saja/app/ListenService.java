@@ -5,13 +5,20 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.hardware.camera2.CameraManager;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.provider.AlarmClock;
 import android.speech.tts.TextToSpeech;
 
 import org.json.JSONObject;
@@ -30,16 +37,37 @@ import java.io.PrintWriter;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Random;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
     private static final String[] WAKE_WORDS = {"jarvis", "jarvus", "javis"};
     private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
             "seventeen", "eighteen", "nineteen", "twenty"};
+    private static final Map<String, String> APPS = new HashMap<>();
+
+    static {
+        APPS.put("whatsapp", "com.whatsapp");
+        APPS.put("youtube", "com.google.android.youtube");
+        APPS.put("chrome", "com.android.chrome");
+        APPS.put("gmail", "com.google.android.gm");
+        APPS.put("maps", "com.google.android.apps.maps");
+        APPS.put("photos", "com.google.android.apps.photos");
+        APPS.put("settings", "com.android.settings");
+        APPS.put("calculator", "com.android.calculator2");
+        APPS.put("clock", "com.android.deskclock");
+        APPS.put("camera", "com.android.camera");
+    }
+
     private final Random random = new Random();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final List<String> reminderLines = new ArrayList<>();
     private Model model;
     private SpeechService speechService;
     private TextToSpeech tts;
@@ -197,8 +225,101 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return out;
     }
 
+    private String clockAt(long ms) {
+        return new SimpleDateFormat("h:mm a", Locale.US).format(new Date(System.currentTimeMillis() + ms));
+    }
+
+    private void later(long ms, String text, String at) {
+        final String entry = at + " " + text;
+        reminderLines.add(entry);
+        handler.postDelayed(() -> {
+            reminderLines.remove(entry);
+            showText(text);
+            speak(text);
+        }, ms);
+    }
+
+    private String remindCmd(String command) {
+        Matcher m = Pattern.compile("remind (?:me )?in (\\S+) minutes?(?: to)? (.+)").matcher(command);
+        if (!m.find()) return "Say remind in, then a number of minutes, then to, then the reminder.";
+        List<Integer> n = numbersIn(m.group(1));
+        if (n.isEmpty()) return "I did not catch the minutes.";
+        long ms = n.get(0) * 60000L;
+        String at = clockAt(ms);
+        later(ms, "Reminder: " + m.group(2).trim(), at);
+        return "Reminder set for " + at + ".";
+    }
+
+    private String timerCmd(String command) {
+        Matcher m = Pattern.compile("timer (\\S+) minutes?").matcher(command);
+        if (!m.find()) return "Say timer, then a number of minutes.";
+        List<Integer> n = numbersIn(m.group(1));
+        if (n.isEmpty()) return "I did not catch the minutes.";
+        long ms = n.get(0) * 60000L;
+        later(ms, "Timer finished.", clockAt(ms));
+        return "Timer set for " + n.get(0) + " minutes.";
+    }
+
+    private String readReminders() {
+        if (reminderLines.isEmpty()) return "You have no reminders.";
+        return "Reminders. " + String.join(". ", reminderLines) + ".";
+    }
+
+    private String alarmCmd(String command) {
+        List<Integer> n = numbersIn(command);
+        if (n.isEmpty()) return "Say the hour, like wake me at seven.";
+        int hour = n.get(0);
+        if (hour > 23) return "That hour is not valid.";
+        if (command.contains("pm") && hour < 12) hour += 12;
+        Intent i = new Intent(AlarmClock.ACTION_SET_ALARM)
+                .putExtra(AlarmClock.EXTRA_HOUR, hour)
+                .putExtra(AlarmClock.EXTRA_MINUTES, 0)
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(i);
+            return "Alarm set for " + hour + " o'clock.";
+        } catch (ActivityNotFoundException e) {
+            return "No clock app found to set the alarm.";
+        }
+    }
+
+    private String vibrateCmd() {
+        Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        if (v != null) v.vibrate(VibrationEffect.createOneShot(1500, VibrationEffect.DEFAULT_AMPLITUDE));
+        return "Vibrating.";
+    }
+
+    private String openCmd(String target) {
+        if (target.isEmpty()) return "Say open, then an app or a website.";
+        String pkg = APPS.get(target);
+        if (pkg != null) {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (launch == null) return target + " is not installed.";
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(launch);
+            return "Opening " + target + ".";
+        }
+        String url = "https://" + target.replace(" ", "") + (target.contains(".") ? "" : ".com");
+        Intent web = new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(web);
+            return "Opening " + target + ".";
+        } catch (ActivityNotFoundException e) {
+            return "No browser found.";
+        }
+    }
+
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
+        if (command.startsWith("remind ")) return remindCmd(command);
+        if (command.equals("reminders") || command.equals("reminder")) return readReminders();
+        if (command.startsWith("timer")) return timerCmd(command);
+        if (command.contains("wake me") || command.startsWith("alarm")) return alarmCmd(command);
+        if (command.equals("vibrate") || command.contains("find my phone") || command.contains("find phone")) {
+            return vibrateCmd();
+        }
+        if (command.startsWith("open ")) return openCmd(command.substring(5).trim());
         if (command.startsWith("delete") && command.contains("note")) return deleteLastNote();
         if (command.equals("notes") || command.equals("note")) return readNotes();
         if (command.startsWith("note ")) return saveNote(command.substring(5).trim());
@@ -290,6 +411,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     @Override
     public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         if (speechService != null) {
             speechService.stop();
             speechService.shutdown();
@@ -303,3 +425,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
+            
