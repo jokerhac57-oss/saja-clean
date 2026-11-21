@@ -4,5 +4,5 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
-    android:description="Lets SAJA read the text on your screen and tap what you ask for."
+    android:description="@string/screen_helper_desc"
     android:notificationTimeout="200" />
