@@ -13,7 +13,10 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.database.Cursor;
 import android.hardware.camera2.CameraManager;
+import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
@@ -72,15 +75,22 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private static final String VISION_MODEL = "qwen/qwen3.8-27b";
     private static final String NO_CONTACTS = "#nocontacts";
     private static final String HOME_FILE = "home_wifi.txt";
-    private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
-            "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-            "seventeen", "eighteen", "nineteen", "twenty"};
     private static final String[] SAFE_STEPS = {"time", "date", "battery", "status", "flashlight on",
             "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders",
-            "weather", "music ", "volume ", "directions to ", "calendar", "notifications"};
+            "weather", "music ", "volume ", "directions to ", "calendar", "notifications", "focus mode"};
+    private static final Map<String, Integer> WORD_VALUES = new HashMap<>();
     private static final Map<String, String> APPS = new HashMap<>();
 
     static {
+        String[] names = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+                "eighteen", "nineteen", "twenty"};
+        for (int i = 0; i < names.length; i++) WORD_VALUES.put(names[i], i);
+        WORD_VALUES.put("thirty", 30);
+        WORD_VALUES.put("forty", 40);
+        WORD_VALUES.put("fifty", 50);
+        WORD_VALUES.put("sixty", 60);
+
         APPS.put("whatsapp", "com.whatsapp");
         APPS.put("youtube", "com.google.android.youtube");
         APPS.put("chrome", "com.android.chrome");
@@ -103,11 +113,15 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private Runnable pendingYes = null;
     private long pendingSince = 0;
     private boolean wasHome = false;
+    private boolean batteryAlerted = false;
+    private String lastBriefingDay = "";
 
-    private final Runnable homeCheck = new Runnable() {
+    private final Runnable everyMinute = new Runnable() {
         @Override
         public void run() {
             checkHome();
+            checkBriefing();
+            checkBattery();
             handler.postDelayed(this, 60000);
         }
     };
@@ -132,7 +146,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
                     startRecognition();
                 },
                 (e) -> showText("Speech model failed: " + e.getMessage()));
-        handler.postDelayed(homeCheck, 60000);
+        handler.postDelayed(everyMinute, 60000);
     }
 
     private void startRecognition() {
@@ -207,6 +221,12 @@ public class ListenService extends Service implements RecognitionListener, TextT
             return line == null ? "" : line.trim();
         } catch (IOException e) {
             return "";
+        }
+    }
+
+    private void writeFileText(String name, String value) throws IOException {
+        try (FileWriter w = new FileWriter(new File(getFilesDir(), name))) {
+            w.write(value);
         }
     }
 
@@ -454,13 +474,109 @@ public class ListenService extends Service implements RecognitionListener, TextT
         if (ssid.isEmpty()) return "Connect to your home Wi-Fi first, then say set home wifi.";
         askApproval("Use the Wi-Fi " + ssid + " as your home Wi-Fi?", () -> {
             try {
-                writeLines(new File(getFilesDir(), HOME_FILE), Arrays.asList(ssid));
+                writeFileText(HOME_FILE, ssid);
                 reply("Home Wi-Fi saved.");
             } catch (IOException e) {
                 reply("I could not save the home Wi-Fi.");
             }
         });
         return null;
+    }
+
+    private String focusMode(boolean on) {
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (!nm.isNotificationPolicyAccessGranted()) {
+            try {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (ActivityNotFoundException e) {
+                return "I could not open Do Not Disturb settings.";
+            }
+            return "Allow SAJA in Do Not Disturb access, then say focus mode again.";
+        }
+        nm.setInterruptionFilter(on
+                ? NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                : NotificationManager.INTERRUPTION_FILTER_ALL);
+        return on ? "Focus mode is on. Only priority alerts will ring." : "Focus mode is off.";
+    }
+
+    private void checkBattery() {
+        String raw = readFileText("battery_alert.txt");
+        if (raw.isEmpty()) {
+            batteryAlerted = false;
+            return;
+        }
+        int threshold;
+        try {
+            threshold = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            return;
+        }
+        Intent b = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (b == null) return;
+        int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+        int scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+        int pct = level * 100 / scale;
+        int status = b.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        boolean charging = status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+        if (charging || pct > threshold + 5) {
+            batteryAlerted = false;
+            return;
+        }
+        if (pct <= threshold && !batteryAlerted) {
+            batteryAlerted = true;
+            reply("Battery alert. Battery is " + pct + " percent. Please plug in your charger.");
+        }
+    }
+
+    private String batteryAlertCmd(String command) {
+        if (command.contains("off")) {
+            new File(getFilesDir(), "battery_alert.txt").delete();
+            batteryAlerted = false;
+            return "Battery alert is off.";
+        }
+        List<Integer> n = numbersIn(command);
+        if (n.isEmpty()) return "Say battery alert, then a percent, like battery alert 20.";
+        int threshold = n.get(0);
+        if (threshold < 5 || threshold > 50) return "Choose a number from 5 to 50.";
+        try {
+            writeFileText("battery_alert.txt", String.valueOf(threshold));
+        } catch (IOException e) {
+            return "I could not save the battery alert.";
+        }
+        batteryAlerted = false;
+        return "Battery alert is on at " + threshold + " percent.";
+    }
+
+    private void checkBriefing() {
+        String time = readFileText("briefing_time.txt");
+        if (time.isEmpty()) return;
+        String nowHm = new SimpleDateFormat("HH:mm", Locale.US).format(new Date());
+        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+        if (!nowHm.equals(time) || today.equals(lastBriefingDay)) return;
+        lastBriefingDay = today;
+        reply(morningBriefing());
+    }
+
+    private String morningBriefing() {
+        return "Good morning. " + timeText() + " " + batteryText() + " " + todayEvents() + " " + readReminders();
+    }
+
+    private String setBriefingCmd(String command) {
+        List<Integer> n = numbersIn(command);
+        if (n.isEmpty()) return "Say briefing at, then the time, like briefing at seven thirty.";
+        int hour = n.get(0);
+        int minute = n.size() > 1 ? n.get(1) : 0;
+        if (command.contains("pm") && hour < 12) hour += 12;
+        if (hour > 23 || minute > 59) return "That time is not valid.";
+        String time = String.format(Locale.US, "%02d:%02d", hour, minute);
+        try {
+            writeFileText("briefing_time.txt", time);
+        } catch (IOException e) {
+            return "I could not save the briefing time.";
+        }
+        return "Morning briefing is set for " + time + ".";
     }
 
     private String batteryText() {
@@ -498,13 +614,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
         for (String tok : text.split("\\s+")) {
             if (tok.matches("\\d+")) {
                 out.add(Integer.parseInt(tok));
-            } else {
-                for (int i = 0; i < WORDS.length; i++) {
-                    if (WORDS[i].equals(tok)) {
-                        out.add(i);
-                        break;
-                    }
-                }
+            } else if (WORD_VALUES.containsKey(tok)) {
+                out.add(WORD_VALUES.get(tok));
             }
         }
         return out;
@@ -924,6 +1035,79 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }).start();
     }
 
+    private void stopForNote() {
+        if (speechService != null) {
+            speechService.stop();
+            speechService.shutdown();
+            speechService = null;
+        }
+    }
+
+    private byte[] captureAudio(int seconds) {
+        int rate = 16000;
+        int minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        AudioRecord ar = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 2);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[minBuf];
+        try {
+            ar.startRecording();
+            long end = System.currentTimeMillis() + seconds * 1000L;
+            while (System.currentTimeMillis() < end) {
+                int n = ar.read(buf, 0, buf.length);
+                if (n > 0) out.write(buf, 0, n);
+            }
+        } finally {
+            ar.stop();
+            ar.release();
+        }
+        return out.toByteArray();
+    }
+
+    private String transcribe(byte[] audio) {
+        if (model == null || audio.length == 0) return "";
+        Recognizer rec = null;
+        try {
+            rec = new Recognizer(model, 16000.0f);
+            rec.acceptWaveForm(audio, audio.length);
+            return new JSONObject(rec.getFinalResult()).optString("text", "");
+        } catch (Exception e) {
+            return "";
+        } finally {
+            if (rec != null) rec.close();
+        }
+    }
+
+    private String recordNote(String command) {
+        List<Integer> n = numbersIn(command);
+        final int seconds = n.isEmpty() ? 30 : Math.min(120, Math.max(5, n.get(0)));
+        reply("Recording a voice note for " + seconds + " seconds.");
+        stopForNote();
+        new Thread(() -> {
+            String text;
+            try {
+                text = transcribe(captureAudio(seconds)).trim();
+            } catch (Exception e) {
+                text = "";
+            }
+            final String heard = text;
+            handler.post(() -> {
+                startRecognition();
+                if (heard.isEmpty()) {
+                    reply("I did not hear anything in the voice note.");
+                    return;
+                }
+                try {
+                    appendLine(notesFile(), now() + "|voice note: " + heard);
+                    reply("Voice note saved. " + heard);
+                } catch (IOException e) {
+                    reply("I could not save the voice note.");
+                }
+            });
+        }).start();
+        return null;
+    }
+
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
 
@@ -941,6 +1125,16 @@ public class ListenService extends Service implements RecognitionListener, TextT
             return makeRoutine("home", command.substring(19).trim());
         }
         if (command.equals("set home wifi") || command.equals("set home")) return setHomeWifi();
+
+        if (command.startsWith("focus mode") || command.equals("focus")) {
+            return focusMode(!command.contains("off"));
+        }
+        if (command.startsWith("battery alert")) return batteryAlertCmd(command);
+        if (command.startsWith("briefing at ") || command.startsWith("morning briefing at ")) {
+            return setBriefingCmd(command);
+        }
+        if (command.equals("briefing") || command.equals("morning briefing")) return morningBriefing();
+        if (command.startsWith("record") || command.startsWith("voice note")) return recordNote(command);
 
         if (command.startsWith("forget")) {
             askApproval("Delete everything I remember?", this::clearMemory);
@@ -1188,4 +1382,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
     public IBinder onBind(Intent intent) {
         return null;
     }
-}
+}         
