@@ -360,7 +360,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private boolean isSafeStep(String step) {
         if (step.contains("ask ") || step.startsWith("routine") || step.startsWith("make ")
-                || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")) {
+                || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")
+                || step.startsWith("tool ")) {
             return false;
         }
         for (String s : SAFE_STEPS) {
@@ -1139,6 +1140,14 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
+
+        if (command.equals("tools") || command.equals("tool list")) {
+            return "Offline tools are " + OfflineTools.list() + ".";
+        }
+        if (command.startsWith("tool ")) {
+            String out = OfflineTools.run(this, command.substring(5).trim());
+            return out == null ? "I do not have that tool. Say tools to hear the list." : out;
+        }
 
         if (command.startsWith("tap ")) {
             final String label = command.substring(4).trim();
