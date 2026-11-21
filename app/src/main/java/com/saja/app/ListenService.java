@@ -21,6 +21,7 @@ import android.os.Vibrator;
 import android.provider.AlarmClock;
 import android.speech.tts.TextToSpeech;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.vosk.Model;
 import org.vosk.Recognizer;
@@ -33,9 +34,16 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.PrintWriter;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -47,6 +55,7 @@ import java.util.regex.Pattern;
 
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
     private static final String[] WAKE_WORDS = {"jarvis", "jarvus", "javis"};
+    private static final String MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
     private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
             "seventeen", "eighteen", "nineteen", "twenty"};
@@ -72,6 +81,9 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private SpeechService speechService;
     private TextToSpeech tts;
     private boolean ttsReady = false;
+    private String pendingPrompt = null;
+    private String pendingLabel = null;
+    private long pendingSince = 0;
 
     @Override
     public void onCreate() {
@@ -123,7 +135,20 @@ public class ListenService extends Service implements RecognitionListener, TextT
     }
 
     private void speak(String text) {
-        if (ttsReady) tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "saja");
+        if (!ttsReady) return;
+        int i = 0;
+        boolean first = true;
+        while (i < text.length()) {
+            int end = Math.min(text.length(), i + 3000);
+            tts.speak(text.substring(i, end), first ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, null, "saja" + i);
+            first = false;
+            i = end;
+        }
+    }
+
+    private void reply(String text) {
+        showText(text);
+        speak(text);
     }
 
     private File notesFile() {
@@ -234,8 +259,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         reminderLines.add(entry);
         handler.postDelayed(() -> {
             reminderLines.remove(entry);
-            showText(text);
-            speak(text);
+            reply(text);
         }, ms);
     }
 
@@ -310,8 +334,104 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
+    private void askApproval(String prompt, String label) {
+        pendingPrompt = prompt;
+        pendingLabel = label;
+        pendingSince = System.currentTimeMillis();
+        reply("Send this " + label + " to the model? Say yes or no.");
+    }
+
+    private String readKey() {
+        File f = new File(getFilesDir(), "openrouter.key");
+        if (!f.exists()) return "";
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String line = r.readLine();
+            return line == null ? "" : line.trim();
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    private String readStream(InputStream is) throws IOException {
+        if (is == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private void runModel(String prompt) {
+        String key = readKey();
+        if (key.isEmpty()) {
+            reply("Save your OpenRouter key in the SAJA app first.");
+            return;
+        }
+        showText("Asking the model...");
+        new Thread(() -> {
+            String answer;
+            try {
+                JSONObject body = new JSONObject();
+                body.put("model", MODEL);
+                body.put("max_tokens", 600);
+                JSONObject message = new JSONObject();
+                message.put("role", "user");
+                message.put("content", prompt);
+                body.put("messages", new JSONArray().put(message));
+
+                HttpURLConnection c = (HttpURLConnection) new URL("https://openrouter.ai/api/v1/chat/completions").openConnection();
+                c.setRequestMethod("POST");
+                c.setRequestProperty("Content-Type", "application/json");
+                c.setRequestProperty("Authorization", "Bearer " + key);
+                c.setConnectTimeout(20000);
+                c.setReadTimeout(150000);
+                c.setDoOutput(true);
+                try (OutputStream os = c.getOutputStream()) {
+                    os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+                int code = c.getResponseCode();
+                String raw = readStream(code >= 400 ? c.getErrorStream() : c.getInputStream());
+                if (code >= 400) {
+                    answer = "Model error " + code + ". " + raw.substring(0, Math.min(200, raw.length()));
+                } else {
+                    answer = new JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+                            .getJSONObject("message").getString("content");
+                }
+            } catch (Exception e) {
+                answer = "The model request failed: " + e.getMessage();
+            }
+            answer = answer.replace("*", "").replace("#", "").trim();
+            reply(answer.isEmpty() ? "No reply." : answer);
+        }).start();
+    }
+
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
+        if (command.startsWith("ask ") || command.startsWith("question ")) {
+            String q = command.replaceFirst("^(ask|question) ", "").trim();
+            if (q.isEmpty()) return "Say ask, then your question.";
+            askApproval(q, "question");
+            return null;
+        }
+        if (command.startsWith("translate")) {
+            Matcher tm = Pattern.compile("translate (.+?) to (\\w+)").matcher(command);
+            if (!tm.find()) return "Say translate, then the words, then to, then the language.";
+            askApproval("Translate this into " + tm.group(2) + ". Reply with only the translation: " + tm.group(1), "translation");
+            return null;
+        }
+        if (command.startsWith("define ")) {
+            askApproval("Define this word in two short plain sentences: " + command.substring(7).trim(), "definition");
+            return null;
+        }
+        if (command.contains("joke")) {
+            askApproval("Tell one short clean joke in two lines, plain text.", "joke");
+            return null;
+        }
+        if (command.contains("headlines")) {
+            askApproval("List three major news headlines from today in short plain sentences. If you are not sure they are current, say so first.", "headlines request");
+            return null;
+        }
         if (command.startsWith("remind ")) return remindCmd(command);
         if (command.equals("reminders") || command.equals("reminder")) return readReminders();
         if (command.startsWith("timer")) return timerCmd(command);
@@ -354,13 +474,38 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private void handleText(String heard) {
         String lower = heard.toLowerCase(Locale.US).trim();
+
+        if (pendingPrompt != null) {
+            long age = System.currentTimeMillis() - pendingSince;
+            if (age > 30000) {
+                pendingPrompt = null;
+                pendingLabel = null;
+            } else if (age > 3000) {
+                List<String> tokens = Arrays.asList(lower.split("\\s+"));
+                if (tokens.contains("yes") || tokens.contains("yeah") || tokens.contains("sure")) {
+                    String prompt = pendingPrompt;
+                    pendingPrompt = null;
+                    pendingLabel = null;
+                    runModel(prompt);
+                    return;
+                }
+                if (tokens.contains("no") || tokens.contains("nope") || tokens.contains("cancel")) {
+                    pendingPrompt = null;
+                    pendingLabel = null;
+                    reply("Cancelled.");
+                    return;
+                }
+            }
+        }
+
         for (String w : WAKE_WORDS) {
             int at = lower.indexOf(w);
             if (at >= 0) {
+                pendingPrompt = null;
+                pendingLabel = null;
                 String command = lower.substring(at + w.length()).trim();
-                String reply = answerFor(command);
-                showText(reply);
-                speak(reply);
+                String result = answerFor(command);
+                if (result != null) reply(result);
                 return;
             }
         }
@@ -425,4 +570,3 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-            
