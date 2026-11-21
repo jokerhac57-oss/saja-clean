@@ -75,6 +75,9 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private static final String VISION_MODEL = "qwen/qwen3.8-27b";
     private static final String NO_CONTACTS = "#nocontacts";
     private static final String HOME_FILE = "home_wifi.txt";
+    private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
+            "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+            "seventeen", "eighteen", "nineteen", "twenty"};
     private static final String[] SAFE_STEPS = {"time", "date", "battery", "status", "flashlight on",
             "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders",
             "weather", "music ", "volume ", "directions to ", "calendar", "notifications", "focus mode"};
@@ -82,10 +85,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private static final Map<String, String> APPS = new HashMap<>();
 
     static {
-        String[] names = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
-                "eighteen", "nineteen", "twenty"};
-        for (int i = 0; i < names.length; i++) WORD_VALUES.put(names[i], i);
+        for (int i = 0; i < WORDS.length; i++) WORD_VALUES.put(WORDS[i], i);
         WORD_VALUES.put("thirty", 30);
         WORD_VALUES.put("forty", 40);
         WORD_VALUES.put("fifty", 50);
@@ -356,7 +356,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private boolean isSafeStep(String step) {
         if (step.contains("ask ") || step.startsWith("routine") || step.startsWith("make ")
-                || step.startsWith("delete ") || step.startsWith("read ")) {
+                || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")) {
             return false;
         }
         for (String s : SAFE_STEPS) {
@@ -1111,6 +1111,24 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
 
+        if (command.startsWith("tap ")) {
+            final String label = command.substring(4).trim();
+            if (label.isEmpty()) return "Say tap, then the button name.";
+            askApproval("Tap " + label + " on the screen?", () -> reply(ScreenHelper.clickText(label)));
+            return null;
+        }
+        if (command.contains("on my screen") || command.contains("on the screen") || command.equals("read my screen")) {
+            askApproval("Read the text on your screen and send it to the model?", () -> {
+                String screen = ScreenHelper.readScreen();
+                if (screen.startsWith("Turn on") || screen.startsWith("I cannot")) {
+                    reply(screen);
+                    return;
+                }
+                runModel("Summarize what is on this phone screen in three short sentences:\n\n" + screen);
+            });
+            return null;
+        }
+
         String routineSteps = findRoutineSteps(command);
         if (routineSteps != null) {
             runRoutine(command, routineSteps.split(" \\|\\| "));
@@ -1382,4 +1400,4 @@ public class ListenService extends Service implements RecognitionListener, TextT
     public IBinder onBind(Intent intent) {
         return null;
     }
-}         
+}
