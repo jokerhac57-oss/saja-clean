@@ -70,6 +70,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
+    public static ListenService instance;
     private static final String[] WAKE_WORDS = {"jarvis", "jarvus", "javis"};
     private static final String[] FREE_MODELS = {
             "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -133,6 +134,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(NotificationManager.class)
                     .createNotificationChannel(new NotificationChannel("saja", "SAJA", NotificationManager.IMPORTANCE_LOW));
@@ -361,7 +363,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private boolean isSafeStep(String step) {
         if (step.contains("ask ") || step.startsWith("routine") || step.startsWith("make ")
                 || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")
-                || step.startsWith("tool ")) {
+                || step.startsWith("tool ") || step.startsWith("look")) {
             return false;
         }
         for (String s : SAFE_STEPS) {
@@ -1029,6 +1031,18 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 
+    private void openCameraForLook(String question) {
+        Intent i = new Intent(this, MainActivity.class)
+                .putExtra("look", question)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(i);
+            showText("Take your photo in the camera.");
+        } catch (ActivityNotFoundException e) {
+            reply("I could not open SAJA to start the camera.");
+        }
+    }
+
     private void runVision(String question) {
         handler.post(() -> showText("Looking at your photo..."));
         new Thread(() -> {
@@ -1140,6 +1154,15 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
+
+        if (command.startsWith("look")) {
+            String q = command.replaceFirst("^look( at this| at it| at that)?\\s*", "").trim();
+            if (q.isEmpty()) q = "Describe what you see in this photo.";
+            final String question = q;
+            askApproval("Open the camera, take a photo, and send it to the model? This uses OpenRouter credits.",
+                    () -> openCameraForLook(question));
+            return null;
+        }
 
         if (command.equals("tools") || command.equals("tool list")) {
             return "Offline tools are " + OfflineTools.list() + ".";
@@ -1439,11 +1462,16 @@ public class ListenService extends Service implements RecognitionListener, TextT
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && "com.saja.app.ASK_LOOK".equals(intent.getAction())) {
+            String q = intent.getStringExtra("q");
+            runVision(q == null || q.isEmpty() ? "Describe what you see in this photo." : q);
+        }
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        instance = null;
         handler.removeCallbacksAndMessages(null);
         if (speechService != null) {
             speechService.stop();
@@ -1458,5 +1486,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
+    
+
         
 
