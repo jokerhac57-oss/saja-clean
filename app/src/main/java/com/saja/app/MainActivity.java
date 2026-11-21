@@ -1,7 +1,10 @@
 package com.saja.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
@@ -9,6 +12,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
+    private static final int REQ = 1;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -24,7 +29,7 @@ public class MainActivity extends Activity {
 
         Button start = new Button(this);
         start.setText("START LISTENING");
-        start.setOnClickListener(v -> startForegroundService(new Intent(this, ListenService.class)));
+        start.setOnClickListener(v -> askThenStart());
         box.addView(start);
 
         Button stop = new Button(this);
@@ -34,4 +39,29 @@ public class MainActivity extends Activity {
 
         setContentView(box);
     }
+
+    private void askThenStart() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startListening();
+        } else {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS}, REQ);
+        }
     }
+
+    private void startListening() {
+        Intent i = new Intent(this, ListenService.class);
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(i);
+        } else {
+            startService(i);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == REQ && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            startListening();
+        }
+    }
+}
