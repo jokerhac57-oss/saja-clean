@@ -1,5 +1,6 @@
 package com.saja.app;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -8,8 +9,11 @@ import android.app.Service;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.database.Cursor;
 import android.hardware.camera2.CameraManager;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
@@ -19,7 +23,10 @@ import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.AlarmClock;
+import android.provider.ContactsContract;
 import android.speech.tts.TextToSpeech;
+import android.util.Base64;
+import android.view.KeyEvent;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -30,6 +37,7 @@ import org.vosk.android.SpeechService;
 import org.vosk.android.StorageService;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -56,11 +64,14 @@ import java.util.regex.Pattern;
 public class ListenService extends Service implements RecognitionListener, TextToSpeech.OnInitListener {
     private static final String[] WAKE_WORDS = {"jarvis", "jarvus", "javis"};
     private static final String MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+    private static final String VISION_MODEL = "qwen/qwen3.8-27b";
+    private static final String NO_CONTACTS = "#nocontacts";
     private static final String[] WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven",
             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
             "seventeen", "eighteen", "nineteen", "twenty"};
     private static final String[] SAFE_STEPS = {"time", "date", "battery", "status", "flashlight on",
-            "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders"};
+            "flashlight off", "flush it on", "vibrate", "open ", "remind ", "timer ", "notes", "reminders",
+            "weather", "music ", "volume "};
     private static final Map<String, String> APPS = new HashMap<>();
 
     static {
@@ -172,6 +183,17 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return new File(getFilesDir(), "routines.txt");
     }
 
+    private String readFileText(String name) {
+        File f = new File(getFilesDir(), name);
+        if (!f.exists()) return "";
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String line = r.readLine();
+            return line == null ? "" : line.trim();
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
     private List<String> readLines(File f) {
         List<String> lines = new ArrayList<>();
         if (!f.exists()) return lines;
@@ -196,6 +218,30 @@ public class ListenService extends Service implements RecognitionListener, TextT
         try (FileWriter w = new FileWriter(f, true)) {
             w.write(line + "\n");
         }
+    }
+
+    private String readStream(InputStream is) throws IOException {
+        if (is == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private String httpGet(String url, String bearer) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestProperty("User-Agent", "curl/8.0");
+        if (bearer != null) {
+            c.setRequestProperty("Authorization", "Bearer " + bearer);
+            c.setRequestProperty("Accept", "application/vnd.github+json");
+        }
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(30000);
+        int code = c.getResponseCode();
+        if (code >= 400) throw new IOException("the server returned " + code);
+        return readStream(c.getInputStream());
     }
 
     private String saveNote(String text) {
@@ -484,44 +530,127 @@ public class ListenService extends Service implements RecognitionListener, TextT
         }
     }
 
+    private void sendMediaKey(int action, int keyCode) {
+        Intent i = new Intent(Intent.ACTION_MEDIA_BUTTON);
+        i.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(action, keyCode));
+        sendOrderedBroadcast(i, null);
+    }
+
+    private String setVolume(String direction) {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (direction.contains("up")) {
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI);
+            return "Volume up.";
+        }
+        if (direction.contains("down")) {
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+            return "Volume down.";
+        }
+        return "Say volume up or volume down.";
+    }
+
+    private void weatherAsync(String city) {
+        handler.post(() -> showText("Checking the weather..."));
+        new Thread(() -> {
+            try {
+                String place = city.replace(" ", "+");
+                String raw = httpGet("https://wttr.in/" + place + "?format=%C,+%t", null);
+                replyLater("The weather is " + raw.trim().replace("+", " ") + ".");
+            } catch (Exception e) {
+                replyLater("I could not get the weather. " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private void githubAsync() {
+        String token = readFileText("github.token");
+        if (token.isEmpty()) {
+            reply("Save a GitHub token in the SAJA app first.");
+            return;
+        }
+        handler.post(() -> showText("Checking GitHub..."));
+        new Thread(() -> {
+            try {
+                String raw = httpGet("https://api.github.com/user/repos?per_page=10&sort=updated", token);
+                JSONArray repos = new JSONArray(raw);
+                StringBuilder sb = new StringBuilder("Your latest repositories are. ");
+                for (int i = 0; i < repos.length(); i++) {
+                    sb.append(repos.getJSONObject(i).getString("name")).append(". ");
+                }
+                replyLater(sb.toString());
+            } catch (Exception e) {
+                replyLater("I could not read GitHub. " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private String resolveNumber(String target) {
+        String compact = target.replaceAll("[\\s-]", "");
+        if (compact.matches("\\+?\\d{5,}")) return compact;
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return NO_CONTACTS;
+        }
+        String want = target.toLowerCase(Locale.US);
+        Cursor cursor = getContentResolver().query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER},
+                null, null, null);
+        if (cursor == null) return null;
+        try {
+            while (cursor.moveToNext()) {
+                String display = cursor.getString(0);
+                String number = cursor.getString(1);
+                if (display != null && number != null && display.toLowerCase(Locale.US).contains(want)) {
+                    return number.replaceAll("[^+0-9]", "");
+                }
+            }
+        } finally {
+            cursor.close();
+        }
+        return null;
+    }
+
+    private void dial(String number) {
+        try {
+            startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + number))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            reply("The dialer is open. Tap call to dial.");
+        } catch (ActivityNotFoundException e) {
+            reply("No phone app found.");
+        }
+    }
+
+    private void sendSms(String number, String body) {
+        try {
+            Intent i = new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + number));
+            i.putExtra("sms_body", body);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            reply("Your message is ready. Tap send.");
+        } catch (ActivityNotFoundException e) {
+            reply("No message app found.");
+        }
+    }
+
     private void askApproval(String question, Runnable onYes) {
         pendingYes = onYes;
         pendingSince = System.currentTimeMillis();
         reply(question + " Say yes or no.");
     }
 
-    private String readKey() {
-        File f = new File(getFilesDir(), "openrouter.key");
-        if (!f.exists()) return "";
-        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
-            String line = r.readLine();
-            return line == null ? "" : line.trim();
-        } catch (IOException e) {
-            return "";
-        }
+    private JSONArray textMessages(String prompt) throws Exception {
+        return new JSONArray().put(new JSONObject().put("role", "user").put("content", prompt));
     }
 
-    private String readStream(InputStream is) throws IOException {
-        if (is == null) return "";
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = r.readLine()) != null) sb.append(line).append("\n");
-        }
-        return sb.toString();
-    }
-
-    private String callModel(String prompt) {
-        String key = readKey();
+    private String callOpenRouter(String modelName, JSONArray messages) {
+        String key = readFileText("openrouter.key");
         if (key.isEmpty()) return "Save your OpenRouter key in the SAJA app first.";
         try {
             JSONObject body = new JSONObject();
-            body.put("model", MODEL);
+            body.put("model", modelName);
             body.put("max_tokens", 600);
-            JSONObject message = new JSONObject();
-            message.put("role", "user");
-            message.put("content", prompt);
-            body.put("messages", new JSONArray().put(message));
+            body.put("messages", messages);
 
             HttpURLConnection c = (HttpURLConnection) new URL("https://openrouter.ai/api/v1/chat/completions").openConnection();
             c.setRequestMethod("POST");
@@ -540,6 +669,14 @@ public class ListenService extends Service implements RecognitionListener, TextT
             }
             return new JSONObject(raw).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content");
+        } catch (Exception e) {
+            return "The model request failed: " + e.getMessage();
+        }
+    }
+
+    private String callModel(String prompt) {
+        try {
+            return callOpenRouter(MODEL, textMessages(prompt));
         } catch (Exception e) {
             return "The model request failed: " + e.getMessage();
         }
@@ -582,7 +719,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private void summarizeSite(String url) {
         handler.post(() -> showText("Reading the page..."));
         new Thread(() -> {
-            String text = "";
+            String text;
             try {
                 text = fetchText(url);
             } catch (Exception e) {
@@ -595,6 +732,48 @@ public class ListenService extends Service implements RecognitionListener, TextT
             }
             String answer = callModel("Summarize this web page in four short sentences:\n\n" + text);
             replyLater(answer.replace("*", "").replace("#", "").trim());
+        }).start();
+    }
+
+    private String photoQuestion(String question) {
+        if (readFileText("photo_uri.txt").isEmpty()) return "Take a photo first with TAKE PHOTO in the SAJA app.";
+        askApproval("Send your last photo to the model? This uses OpenRouter credits.", () -> runVision(question));
+        return null;
+    }
+
+    private void runVision(String question) {
+        handler.post(() -> showText("Looking at your photo..."));
+        new Thread(() -> {
+            try {
+                Uri uri = Uri.parse(readFileText("photo_uri.txt"));
+                byte[] bytes = new byte[0];
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) {
+                        replyLater("I could not open the photo.");
+                        return;
+                    }
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    bytes = out.toByteArray();
+                }
+                if (bytes.length == 0) {
+                    replyLater("The photo is empty. Take it again with TAKE PHOTO in the SAJA app.");
+                    return;
+                }
+                String b64 = Base64.encodeToString(bytes, Base64.NO_WRAP);
+                JSONArray content = new JSONArray();
+                content.put(new JSONObject().put("type", "text").put("text", question));
+                content.put(new JSONObject().put("type", "image_url")
+                        .put("image_url", new JSONObject().put("url", "data:image/jpeg;base64," + b64)));
+                JSONArray messages = new JSONArray()
+                        .put(new JSONObject().put("role", "user").put("content", content));
+                String answer = callOpenRouter(VISION_MODEL, messages);
+                replyLater(answer.replace("*", "").replace("#", "").trim());
+            } catch (Exception e) {
+                replyLater("The photo question failed: " + e.getMessage());
+            }
         }).start();
     }
 
@@ -655,6 +834,59 @@ public class ListenService extends Service implements RecognitionListener, TextT
             String url = target.startsWith("http") ? target
                     : "https://" + target.replace(" ", "") + (target.contains(".") ? "" : ".com");
             askApproval("Read and summarize " + target + "? This sends the page text to the model.", () -> summarizeSite(url));
+            return null;
+        }
+
+        if (command.startsWith("call ")) {
+            String target = command.substring(5).trim();
+            String number = resolveNumber(target);
+            if (number == null) return "I could not find " + target + " in your contacts.";
+            if (number.equals(NO_CONTACTS)) return "Allow contacts in the SAJA app first, or say the phone number.";
+            askApproval("Open the dialer to call " + target + "?", () -> dial(number));
+            return null;
+        }
+        if (command.startsWith("text ")) {
+            String[] parts = command.substring(5).trim().split("\\s+", 2);
+            if (parts.length < 2) return "Say text, then a name, then the message.";
+            String target = parts[0];
+            String body = parts[1];
+            String number = resolveNumber(target);
+            if (number == null) return "I could not find " + target + " in your contacts.";
+            if (number.equals(NO_CONTACTS)) return "Allow contacts in the SAJA app first, or say the phone number.";
+            askApproval("Prepare a message to " + target + " saying " + body + "?", () -> sendSms(number, body));
+            return null;
+        }
+        if (command.startsWith("photo ") || command.startsWith("picture ")) {
+            String q = command.replaceFirst("^(photo|picture) ", "").trim();
+            return photoQuestion(q.isEmpty() ? "Describe this photo." : q);
+        }
+        if (command.equals("photo") || command.equals("picture")) return "Say photo, then your question.";
+        if (command.startsWith("music ")) {
+            String action = command.substring(6).trim();
+            int code;
+            if (action.equals("play") || action.equals("pause")) {
+                code = KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE;
+            } else if (action.equals("next")) {
+                code = KeyEvent.KEYCODE_MEDIA_NEXT;
+            } else if (action.equals("previous") || action.equals("back")) {
+                code = KeyEvent.KEYCODE_MEDIA_PREVIOUS;
+            } else {
+                return "Say music, then play, pause, next, or previous.";
+            }
+            sendMediaKey(KeyEvent.ACTION_DOWN, code);
+            sendMediaKey(KeyEvent.ACTION_UP, code);
+            return "Done.";
+        }
+        if (command.startsWith("volume ")) return setVolume(command.substring(7).trim());
+        if (command.contains("weather")) {
+            String city = "";
+            int idx = command.indexOf(" in ");
+            if (idx >= 0) city = command.substring(idx + 4).trim();
+            weatherAsync(city);
+            return null;
+        }
+        if (command.contains("github") || command.contains("repos")) {
+            githubAsync();
             return null;
         }
 
@@ -792,4 +1024,3 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-                                
