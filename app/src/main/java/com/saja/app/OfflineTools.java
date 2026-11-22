@@ -1,4 +1,4 @@
-package com.saja.app;
+ package com.saja.app;
 
 import android.Manifest;
 import android.content.Context;
@@ -46,7 +46,9 @@ public class OfflineTools {
     private static final String[] NAMES = {"battery", "time", "date", "notes", "memory",
             "notifications", "history", "usage", "calendar", "calc", "convert", "currency",
             "headlines", "define", "shopping", "days until", "spent", "expenses", "habit", "habits",
-            "stopwatch", "tip", "qr", "time in", "quiz", "quiz answer", "fact"};
+            "stopwatch", "tip", "qr", "time in", "quiz", "quiz answer", "fact",
+            "flashcard", "flashcard answer", "bill", "bills", "reading list", "read later add",
+            "reading done", "journal", "journal week", "random number", "count words"};
 
     private static final Map<String, Integer> NUMBERS = new HashMap<>();
     private static final Map<String, Double> LENGTH = new HashMap<>();
@@ -132,9 +134,14 @@ public class OfflineTools {
         if (in.equals("stopwatch")) return stopwatch(c, "");
         if (in.equals("quiz answer")) return quizAnswer(c);
         if (in.equals("quiz")) return quiz(c);
+        if (in.equals("flashcard answer")) return flashcardAnswer(c);
+        if (in.equals("flashcard")) return flashcard(c);
         if (in.equals("fact")) return FACTS[RANDOM.nextInt(FACTS.length)];
         if (in.equals("expenses")) return expenses(c, false);
         if (in.equals("expenses today")) return expenses(c, true);
+        if (in.equals("bills")) return bills(c);
+        if (in.equals("reading list")) return readingList(c);
+        if (in.equals("journal week")) return journalWeek(c);
         if (in.startsWith("calc ")) return calc(in.substring(5));
         if (in.startsWith("convert ")) return convert(in.substring(8));
         if (in.startsWith("currency ")) return currency(in.substring(9));
@@ -147,6 +154,12 @@ public class OfflineTools {
         if (in.startsWith("tip ")) return tip(in.substring(4).trim());
         if (in.startsWith("qr ")) return qr(c, in.substring(3).trim());
         if (in.startsWith("time in ")) return timeIn(in.substring(8).trim());
+        if (in.startsWith("bill ")) return addBill(c, in.substring(5).trim());
+        if (in.startsWith("read later add ")) return addReading(c, in.substring(15).trim());
+        if (in.startsWith("reading done ")) return doneReading(c, in.substring(13).trim());
+        if (in.startsWith("journal ")) return addJournal(c, in.substring(8).trim());
+        if (in.startsWith("random number ")) return randomNumber(in.substring(14).trim());
+        if (in.startsWith("count words ")) return countWords(in.substring(12).trim());
         return null;
     }
 
@@ -661,7 +674,6 @@ public class OfflineTools {
         try {
             if (arg.equals("start")) {
                 if (new File(c.getFilesDir(), "stopwatch.txt").exists()) return "The stopwatch is already running.";
-                appendFile(c, "stopwatch.txt", String.valueOf(System.currentTimeMillis()));
                 writeFile(c, "stopwatch.txt", Arrays.asList(String.valueOf(System.currentTimeMillis())));
                 return "Stopwatch started.";
             }
@@ -756,6 +768,168 @@ public class OfflineTools {
         if (saved.isEmpty()) return "Ask me a quiz first. Say tool quiz.";
         return "The answer is " + saved.get(0) + ".";
     }
+
+    private static String flashcard(Context c) {
+        List<String> candidates = new ArrayList<>();
+        for (String l : fileLines(c, "notes.txt")) {
+            String[] p = l.split("\\|", 2);
+            String text = p.length == 2 ? p[1] : l;
+            if (text.trim().split("\\s+").length >= 6) candidates.add(text.trim());
+        }
+        if (candidates.isEmpty()) return "Save a longer note first, with say note and at least six words.";
+        String text = candidates.get(RANDOM.nextInt(candidates.size()));
+        String[] words = text.split("\\s+");
+        int cut = words.length / 2;
+        String front = String.join(" ", Arrays.copyOfRange(words, 0, cut));
+        String back = String.join(" ", Arrays.copyOfRange(words, cut, words.length));
+        try {
+            writeFile(c, "flashcard.txt", Arrays.asList(back));
+        } catch (IOException e) {
+            return "I could not start the flashcard.";
+        }
+        return "Flashcard. " + front + ". Say tool flashcard answer to see the rest.";
+    }
+
+    private static String flashcardAnswer(Context c) {
+        List<String> saved = fileLines(c, "flashcard.txt");
+        if (saved.isEmpty()) return "Get a card first. Say tool flashcard.";
+        return "The rest is. " + saved.get(0);
+    }
+
+    private static String addBill(Context c, String rest) {
+        Matcher d = Pattern.compile("on the (\\d{1,2})").matcher(rest);
+        if (!d.find()) return "Say bill, then the name, the amount, and on the day, like bill electricity 25 on the 5th.";
+        int day = Integer.parseInt(d.group(1));
+        if (day < 1 || day > 31) return "Choose a day from 1 to 31.";
+        String before = rest.substring(0, d.start()).trim();
+        String[] tokens = before.split("\\s+");
+        int amountIndex = -1;
+        for (int i = tokens.length - 1; i >= 0; i--) {
+            if (tokens[i].matches("[0-9]+(\\.[0-9]+)?")) {
+                amountIndex = i;
+                break;
+            }
+        }
+        if (amountIndex < 1) return "I need a name and an amount before on the day.";
+        String amount = tokens[amountIndex];
+        String name = String.join(" ", Arrays.copyOfRange(tokens, 0, amountIndex));
+        try {
+            appendFile(c, "bills.txt", day + "|" + amount + "|" + name);
+        } catch (IOException e) {
+            return "I could not save that bill.";
+        }
+        return "Saved " + name + " for " + amount + " on day " + day + " of each month.";
+    }
+
+    private static String bills(Context c) {
+        List<String> items = fileLines(c, "bills.txt");
+        if (items.isEmpty()) return "You have no bills saved.";
+        Calendar cal = Calendar.getInstance();
+        int todayDay = cal.get(Calendar.DAY_OF_MONTH);
+        int daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH);
+        StringBuilder sb = new StringBuilder("Your bills. ");
+        for (String l : items) {
+            String[] p = l.split("\\|", 3);
+            if (p.length < 3) continue;
+            int day;
+            try {
+                day = Integer.parseInt(p[0]);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String when;
+            if (day >= todayDay) {
+                int left = day - todayDay;
+                when = left == 0 ? "due today" : "due in " + left + " days";
+            } else {
+                int left = daysInMonth - todayDay + day;
+                when = "already passed this month, next due in " + left + " days";
+            }
+            sb.append(p[2]).append(" for ").append(p[1]).append(", ").append(when).append(". ");
+        }
+        return sb.toString();
+    }
+
+    private static String addReading(Context c, String title) {
+        if (title.isEmpty()) return "Say read later add, then the title.";
+        try {
+            appendFile(c, "reading.txt", title);
+        } catch (IOException e) {
+            return "I could not save that.";
+        }
+        return "Added " + title + " to your reading list.";
+    }
+
+    private static String readingList(Context c) {
+        List<String> items = fileLines(c, "reading.txt");
+        if (items.isEmpty()) return "Your reading list is empty.";
+        StringBuilder sb = new StringBuilder("Your reading list has " + items.size() + " items. ");
+        for (String i : items) sb.append(i).append(". ");
+        return sb.toString();
+    }
+
+    private static String doneReading(Context c, String title) {
+        List<String> items = fileLines(c, "reading.txt");
+        List<String> kept = new ArrayList<>();
+        boolean removed = false;
+        for (String i : items) {
+            if (!removed && i.equalsIgnoreCase(title)) {
+                removed = true;
+            } else {
+                kept.add(i);
+            }
+        }
+        if (!removed) return "I could not find " + title + " on your reading list.";
+        try {
+            writeFile(c, "reading.txt", kept);
+        } catch (IOException e) {
+            return "I could not update the reading list.";
+        }
+        return "Marked " + title + " as read.";
+    }
+
+    private static String addJournal(Context c, String entry) {
+        if (entry.isEmpty()) return "Say journal, then what you want to write.";
+        try {
+            appendFile(c, "journal.txt", today() + "|" + entry);
+        } catch (IOException e) {
+            return "I could not save the journal entry.";
+        }
+        return "Journal entry saved for today.";
+    }
+
+    private static String journalWeek(Context c) {
+        String weekAgo = dayOffset(6);
+        List<String> entries = new ArrayList<>();
+        for (String l : fileLines(c, "journal.txt")) {
+            String[] p = l.split("\\|", 2);
+            if (p.length == 2 && p[0].compareTo(weekAgo) >= 0) entries.add(p[1]);
+        }
+        if (entries.isEmpty()) return "You have no journal entries this week.";
+        StringBuilder sb = new StringBuilder("This week you wrote " + entries.size() + " entries. Latest. ");
+        for (int i = Math.max(0, entries.size() - 3); i < entries.size(); i++) {
+            sb.append(entries.get(i)).append(". ");
+        }
+        return sb.toString();
+    }
+
+    private static String randomNumber(String range) {
+        Matcher m = Pattern.compile("(\\d+) to (\\d+)").matcher(range);
+        if (!m.find()) return "Say random number, then a range, like random number 1 to 100.";
+        int lo = Integer.parseInt(m.group(1));
+        int hi = Integer.parseInt(m.group(2));
+        if (lo > hi) {
+            int t = lo;
+            lo = hi;
+            hi = t;
+        }
+        return "Your number is " + (lo + RANDOM.nextInt(hi - lo + 1)) + ".";
+    }
+
+    private static String countWords(String text) {
+        if (text.isEmpty()) return "Say count words, then the text.";
+        int count = text.trim().split("\\s+").length;
+        return "That has " + count + (count == 1 ? " word." : " words.");
+    }
 }    
 
-                        
