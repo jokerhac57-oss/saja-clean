@@ -319,6 +319,25 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return "Last note deleted.";
     }
 
+    private String lastVoiceNote() {
+        String found = null;
+        for (String l : readLines(notesFile())) {
+            int at = l.indexOf("voice note: ");
+            if (at >= 0) found = l.substring(at + 12);
+        }
+        return found;
+    }
+
+    private String notesContext() {
+        StringBuilder all = new StringBuilder();
+        for (String l : readLines(notesFile())) {
+            String[] parts = l.split("\\|", 2);
+            all.append(parts.length == 2 ? parts[1] : l).append("\n");
+        }
+        String text = all.toString();
+        return text.length() > 3000 ? text.substring(text.length() - 3000) : text;
+    }
+
     private String rememberFact(String fact) {
         if (fact.isEmpty()) return "Say remember, then what to remember.";
         try {
@@ -363,7 +382,9 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private boolean isSafeStep(String step) {
         if (step.contains("ask ") || step.startsWith("routine") || step.startsWith("make ")
                 || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")
-                || step.startsWith("tool ") || step.startsWith("look")) {
+                || step.startsWith("type ") || step.startsWith("tool ") || step.startsWith("look")
+                || step.startsWith("automate") || step.startsWith("draft ") || step.startsWith("improve ")
+                || step.startsWith("summarize ")) {
             return false;
         }
         for (String s : SAFE_STEPS) {
@@ -441,6 +462,54 @@ public class ListenService extends Service implements RecognitionListener, TextT
         String result = answerFor(steps[index].trim());
         if (result != null) reply(result);
         handler.postDelayed(() -> runStep(name, steps, index + 1), 2500);
+    }
+
+    private void runAutomation(String plan) {
+        List<String> steps = new ArrayList<>();
+        for (String s : plan.split(" then ")) {
+            String t = s.trim();
+            if (!t.isEmpty()) steps.add(t);
+        }
+        if (steps.isEmpty()) {
+            reply("Say automate, then the steps, separated by then.");
+            return;
+        }
+        if (steps.size() > 8) {
+            reply("An automation can have up to eight steps.");
+            return;
+        }
+        for (String s : steps) {
+            if (!(s.startsWith("open ") || s.startsWith("tap ") || s.startsWith("wait ") || s.startsWith("type "))) {
+                reply("I can only open apps, tap buttons, type text, and wait. The step " + s + " is not allowed.");
+                return;
+            }
+        }
+        runAutoStep(steps, 0);
+    }
+
+    private void runAutoStep(List<String> steps, int index) {
+        if (index >= steps.size()) {
+            replyLater("Automation finished.");
+            return;
+        }
+        final String step = steps.get(index);
+        final int next = index + 1;
+        askApproval("Step " + next + " of " + steps.size() + ": " + step + ".", () -> {
+            if (step.startsWith("wait ")) {
+                List<Integer> n = numbersIn(step);
+                int seconds = n.isEmpty() ? 2 : Math.min(30, Math.max(1, n.get(0)));
+                handler.postDelayed(() -> runAutoStep(steps, next), seconds * 1000L);
+                return;
+            }
+            if (step.startsWith("open ")) {
+                reply(openCmd(step.substring(5).trim()));
+            } else if (step.startsWith("tap ")) {
+                reply(ScreenHelper.clickText(step.substring(4).trim()));
+            } else if (step.startsWith("type ")) {
+                reply(ScreenHelper.typeText(step.substring(5).trim()));
+            }
+            handler.postDelayed(() -> runAutoStep(steps, next), 2500);
+        });
     }
 
     private String currentSsid() {
@@ -1155,6 +1224,52 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
 
+        if (command.startsWith("automate ")) {
+            runAutomation(command.substring(9).trim());
+            return null;
+        }
+
+        if (command.startsWith("type ")) {
+            final String text = command.substring(5).trim();
+            if (text.isEmpty()) return "Say type, then the words to type.";
+            askApproval("Type " + text + " into the text box you tapped?", () -> reply(ScreenHelper.typeText(text)));
+            return null;
+        }
+
+        if (command.startsWith("draft ")) {
+            final String request = command.substring(6).trim();
+            if (request.isEmpty()) return "Say draft, then what you want written.";
+            String prompt = "Write this for me. Reply with only the finished text, ready to send, plain and friendly: " + request;
+            askApproval("Send this writing request to the model?", () -> runModel(prompt));
+            return null;
+        }
+
+        if (command.startsWith("improve prompt ") || command.startsWith("improve ")) {
+            final String rough = command.replaceFirst("^improve (prompt )?", "").trim();
+            if (rough.isEmpty()) return "Say improve prompt, then your rough request.";
+            String prompt = "Rewrite this rough request as a clear, detailed prompt for an AI assistant. Reply with only the improved prompt: " + rough;
+            askApproval("Send this prompt to the model to improve it?", () -> runModel(prompt));
+            return null;
+        }
+
+        if (command.equals("summarize my last voice note") || command.equals("summarize voice note")
+                || command.equals("summarize last recording") || command.equals("summarize my last recording")) {
+            String note = lastVoiceNote();
+            if (note == null) return "You have no voice notes yet. Say record a voice note first.";
+            String prompt = "Summarize this recording in three short sentences, then list any action items as short plain lines:\n\n" + note;
+            askApproval("Send your last voice note to the model for a summary?", () -> runModel(prompt));
+            return null;
+        }
+
+        if (command.startsWith("ask my notes ")) {
+            final String q = command.substring(13).trim();
+            if (q.isEmpty()) return "Say ask my notes, then your question.";
+            String prompt = "Answer this question using only these notes. If the answer is not in the notes, say so.\n\nNotes:\n"
+                    + notesContext() + "\n\nQuestion: " + q;
+            askApproval("Send your notes and question to the model? This uses OpenRouter credits.", () -> runModel(prompt));
+            return null;
+        }
+
         if (command.startsWith("look")) {
             String q = command.replaceFirst("^look( at this| at it| at that)?\\s*", "").trim();
             if (q.isEmpty()) q = "Describe what you see in this photo.";
@@ -1486,7 +1601,3 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return null;
     }
 }
-    
-
-        
-
