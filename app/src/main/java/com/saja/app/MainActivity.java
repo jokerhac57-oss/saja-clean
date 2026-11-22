@@ -1,11 +1,13 @@
- package com.saja.app;
+package com.saja.app;
 
 import android.Manifest;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -16,6 +18,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -34,49 +37,14 @@ public class MainActivity extends Activity {
     private static final int REQ_CALENDAR = 4;
     private static final int REQ_CAMERA = 5;
     private static final int REQ_DOC = 6;
-    private static final int CYAN = 0xFF00E5FF;
-    private static final int PANEL = 0xFF0B1A24;
-    private static final int BLACK = 0xFF05070A;
     private String pendingLook = null;
+    private SharedPreferences prefs;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.setBackgroundColor(BLACK);
-        box.setPadding(60, 200, 60, 60);
-
-        TextView title = new TextView(this);
-        title.setText("S A J A");
-        title.setTextSize(30);
-        title.setTextColor(CYAN);
-        title.setGravity(Gravity.CENTER);
-        title.setShadowLayer(18f, 0f, 0f, CYAN);
-        title.setPadding(0, 0, 0, 40);
-        box.addView(title);
-
-        box.addView(button("START LISTENING", v -> askThenStart()));
-        box.addView(button("STOP", v -> stopService(new Intent(this, ListenService.class))));
-
-        EditText keyBox = input("Paste your OpenRouter key");
-        box.addView(keyBox);
-        box.addView(button("SAVE API KEY", v -> saveSecret("openrouter.key", keyBox.getText().toString().trim(), "API key")));
-
-        EditText githubBox = input("Paste your GitHub token");
-        box.addView(githubBox);
-        box.addView(button("SAVE GITHUB TOKEN", v -> saveSecret("github.token", githubBox.getText().toString().trim(), "GitHub token")));
-
-        box.addView(button("TAKE PHOTO", v -> { pendingLook = null; launchCamera(); }));
-        box.addView(button("PICK DOCUMENT", v -> pickDocument()));
-        box.addView(button("ALLOW CONTACTS", v -> requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQ_CONTACTS)));
-        box.addView(button("ALLOW LOCATION (HOME WI-FI)", v -> requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION)));
-        box.addView(button("ALLOW CALENDAR", v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CALENDAR)));
-        box.addView(button("NOTIFICATION ACCESS", v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
-
-        setContentView(box);
-
+        prefs = getSharedPreferences("saja", MODE_PRIVATE);
+        setContentView(buildUi());
         String look = getIntent().getStringExtra("look");
         if (look != null) {
             pendingLook = look;
@@ -84,22 +52,182 @@ public class MainActivity extends Activity {
         }
     }
 
-    private Button button(String text, View.OnClickListener listener) {
+    private boolean light() {
+        return prefs.getBoolean("light", false);
+    }
+
+    private boolean ravaan() {
+        return prefs.getBoolean("ravaan", false);
+    }
+
+    private int bgColor() {
+        return light() ? 0xFFF2F7FA : 0xFF05070A;
+    }
+
+    private int panelColor() {
+        return light() ? 0xFFFFFFFF : 0xFF0B1A24;
+    }
+
+    private int textColor() {
+        return light() ? 0xFF0B1A24 : 0xFFE6F7FF;
+    }
+
+    private int mutedColor() {
+        return light() ? 0xFF5C7A88 : 0xFF4A7A8C;
+    }
+
+    private int accent() {
+        if (ravaan()) return light() ? 0xFFD96B00 : 0xFFFFB300;
+        return light() ? 0xFF0077A8 : 0xFF00E5FF;
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable box(int fill, int strokeColor, int radiusDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setCornerRadius(dp(radiusDp));
+        g.setStroke(dp(1), strokeColor);
+        return g;
+    }
+
+    private LinearLayout row() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        return l;
+    }
+
+    private LinearLayout.LayoutParams weight() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        p.setMargins(dp(4), 0, dp(4), 0);
+        return p;
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        p.setMargins(0, dp(6), 0, dp(6));
+        return p;
+    }
+
+    private Button card(String text, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextColor(CYAN);
-        b.setBackgroundColor(PANEL);
-        b.setOnClickListener(listener);
+        b.setAllCaps(false);
+        b.setTextSize(15);
+        b.setTextColor(accent());
+        b.setBackground(box(panelColor(), accent(), 16));
+        b.setOnClickListener(l);
         return b;
+    }
+
+    private Button chip(String text, View.OnClickListener l) {
+        Button b = card(text, l);
+        b.setTextSize(13);
+        return b;
+    }
+
+    private TextView section(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(12);
+        t.setTextColor(mutedColor());
+        t.setPadding(dp(4), dp(18), 0, dp(2));
+        return t;
     }
 
     private EditText input(String hint) {
         EditText e = new EditText(this);
         e.setHint(hint);
-        e.setHintTextColor(0xFF4A7A8C);
-        e.setTextColor(CYAN);
+        e.setHintTextColor(mutedColor());
+        e.setTextColor(textColor());
         e.setSingleLine(true);
+        e.setBackground(box(panelColor(), accent(), 16));
+        e.setPadding(dp(14), dp(12), dp(14), dp(12));
         return e;
+    }
+
+    private ScrollView buildUi() {
+        int acc = accent();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(bgColor());
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setPadding(dp(20), dp(36), dp(20), dp(28));
+
+        TextView title = new TextView(this);
+        title.setText("S A J A");
+        title.setTextSize(30);
+        title.setTextColor(acc);
+        title.setGravity(Gravity.CENTER);
+        if (!light()) title.setShadowLayer(18f, 0f, 0f, acc);
+        root.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText(ravaan() ? "RAVAAN MODE  ·  faster replies" : "Your personal assistant");
+        sub.setTextSize(13);
+        sub.setTextColor(mutedColor());
+        sub.setGravity(Gravity.CENTER);
+        sub.setPadding(0, dp(4), 0, dp(8));
+        root.addView(sub);
+
+        HumanoidView figure = new HumanoidView(this);
+        figure.setColors(acc, panelColor());
+        figure.setFast(ravaan());
+        root.addView(figure, new LinearLayout.LayoutParams(dp(220), dp(260)));
+
+        LinearLayout modes = row();
+        modes.addView(chip(light() ? "DARK MODE" : "LIGHT MODE",
+                v -> {
+                    prefs.edit().putBoolean("light", !light()).apply();
+                    recreate();
+                }), weight());
+        modes.addView(chip(ravaan() ? "RAVAAN: ON" : "RAVAAN: OFF",
+                v -> {
+                    prefs.edit().putBoolean("ravaan", !ravaan()).apply();
+                    recreate();
+                }), weight());
+        root.addView(modes, matchWrap());
+
+        root.addView(section("VOICE"));
+        root.addView(card("START LISTENING", v -> askThenStart()), matchWrap());
+        root.addView(card("STOP", v -> stopService(new Intent(this, ListenService.class))), matchWrap());
+
+        root.addView(section("KEYS"));
+        final EditText keyBox = input("Paste your OpenRouter key");
+        root.addView(keyBox, matchWrap());
+        root.addView(card("SAVE API KEY",
+                v -> saveSecret("openrouter.key", keyBox.getText().toString().trim(), "API key")), matchWrap());
+        final EditText githubBox = input("Paste your GitHub token");
+        root.addView(githubBox, matchWrap());
+        root.addView(card("SAVE GITHUB TOKEN",
+                v -> saveSecret("github.token", githubBox.getText().toString().trim(), "GitHub token")), matchWrap());
+
+        root.addView(section("CAMERA AND FILES"));
+        root.addView(card("TAKE PHOTO", v -> {
+            pendingLook = null;
+            launchCamera();
+        }), matchWrap());
+        root.addView(card("PICK DOCUMENT", v -> pickDocument()), matchWrap());
+
+        root.addView(section("PERMISSIONS"));
+        root.addView(card("ALLOW CONTACTS",
+                v -> requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQ_CONTACTS)), matchWrap());
+        root.addView(card("ALLOW LOCATION (HOME WI-FI)",
+                v -> requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION)), matchWrap());
+        root.addView(card("ALLOW CALENDAR",
+                v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CALENDAR)), matchWrap());
+        root.addView(card("NOTIFICATION ACCESS",
+                v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))), matchWrap());
+        root.addView(card("SCREEN HELPER SETTINGS",
+                v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))), matchWrap());
+
+        scroll.addView(root);
+        return scroll;
     }
 
     private void saveSecret(String fileName, String value, String label) {
@@ -233,4 +361,4 @@ public class MainActivity extends Activity {
             Toast.makeText(this, granted ? "Calendar allowed" : "Calendar not allowed", Toast.LENGTH_SHORT).show();
         }
     }
-}                    
+}
