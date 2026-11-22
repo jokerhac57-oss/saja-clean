@@ -1,6 +1,8 @@
- package com.saja.app;
+package com.saja.app;
 
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -8,7 +10,10 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.BatteryManager;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.CalendarContract;
+import android.speech.tts.TextToSpeech;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -48,7 +53,8 @@ public class OfflineTools {
             "headlines", "define", "shopping", "days until", "spent", "expenses", "habit", "habits",
             "stopwatch", "tip", "qr", "time in", "quiz", "quiz answer", "fact",
             "flashcard", "flashcard answer", "bill", "bills", "reading list", "read later add",
-            "reading done", "journal", "journal week", "random number", "count words"};
+            "reading done", "journal", "journal week", "random number", "count words",
+            "daily update", "dictionary", "remind habit", "habit reminders", "expenses by item"};
 
     private static final Map<String, Integer> NUMBERS = new HashMap<>();
     private static final Map<String, Double> LENGTH = new HashMap<>();
@@ -63,8 +69,16 @@ public class OfflineTools {
             "Wombats produce cube-shaped droppings."
     };
     private static final Random RANDOM = new Random();
+    private static final Set<String> FIRED = new HashSet<>();
     private static String src = "";
     private static int pos = 0;
+
+    private static Context appCtx;
+    private static Handler tickHandler;
+    private static boolean ticking = false;
+    private static String lastDailyDay = "";
+    private static TextToSpeech tts;
+    private static boolean ttsReady = false;
 
     static {
         String[] small = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -119,10 +133,19 @@ public class OfflineTools {
     }
 
     public static String run(Context c, String input) {
+        ensureTicking(c);
         String in = input.trim();
+        if (in.startsWith("daily update ")) return dailyUpdateSet(c, in.substring(13).trim().replaceFirst("^at ", ""));
+        if (in.equals("daily update")) return dailyUpdateSet(c, "off");
+        if (in.startsWith("dictionary ")) return define(joinWord(in.substring(11)));
+        if (in.startsWith("remind habit ")) return setHabitRemind(c, in.substring(13).trim());
+        if (in.equals("habit reminders")) return habitReminders(c);
+        if (in.startsWith("stop habit remind ")) return stopHabitRemind(c, in.substring(18).trim());
+        if (in.equals("expenses by item")) return expensesByItem(c);
+
         if (in.equals("battery")) return battery(c);
-        if (in.equals("time")) return "It is " + new SimpleDateFormat("h:mm a", Locale.US).format(new Date()) + ".";
-        if (in.equals("date")) return "Today is " + new SimpleDateFormat("EEEE, MMMM d", Locale.US).format(new Date()) + ".";
+        if (in.equals("time")) return timeText();
+        if (in.equals("date")) return dateText();
         if (in.equals("notes")) return lastParts(c, "notes.txt", 5, "Your last notes are. ", "You have no notes yet.");
         if (in.equals("memory")) return lastParts(c, "memory.txt", 10, "I remember. ", "I do not remember anything yet.");
         if (in.equals("notifications")) return notifications();
@@ -163,6 +186,49 @@ public class OfflineTools {
         return null;
     }
 
+    private static void ensureTicking(Context c) {
+        appCtx = c.getApplicationContext();
+        if (ticking) return;
+        ticking = true;
+        tickHandler = new Handler(Looper.getMainLooper());
+        tickHandler.postDelayed(TICK, 60000);
+    }
+
+    private static final Runnable TICK = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                checkDailyUpdate();
+                checkHabitReminders();
+            } catch (Exception e) {
+                // keep ticking even if one check fails
+            }
+            tickHandler.postDelayed(this, 60000);
+        }
+    };
+
+    private static void speakOut(Context c, String text) {
+        Context app = c.getApplicationContext();
+        if (tts == null) {
+            tts = new TextToSpeech(app, status -> {
+                if (status == TextToSpeech.SUCCESS) {
+                    tts.setLanguage(Locale.US);
+                    ttsReady = true;
+                }
+            });
+        }
+        if (ttsReady) tts.speak(text, TextToSpeech.QUEUE_ADD, null, "tool" + System.currentTimeMillis());
+        NotificationManager nm = (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null) {
+            nm.notify(5, new Notification.Builder(app, "saja")
+                    .setContentTitle("SAJA")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                    .setAutoCancel(true)
+                    .build());
+        }
+    }
+
     private static String today() {
         return dayOffset(0);
     }
@@ -171,6 +237,18 @@ public class OfflineTools {
         Calendar cal = Calendar.getInstance();
         cal.add(Calendar.DAY_OF_YEAR, -days);
         return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(cal.getTime());
+    }
+
+    private static String nowHm() {
+        return new SimpleDateFormat("HH:mm", Locale.US).format(new Date());
+    }
+
+    private static String timeText() {
+        return "It is " + new SimpleDateFormat("h:mm a", Locale.US).format(new Date()) + ".";
+    }
+
+    private static String dateText() {
+        return "Today is " + new SimpleDateFormat("EEEE, MMMM d", Locale.US).format(new Date()) + ".";
     }
 
     private static List<String> fileLines(Context c, String name) {
@@ -300,6 +378,27 @@ public class OfflineTools {
             }
         }
         return any ? total + current : null;
+    }
+
+    private static int[] parseClock(String s) {
+        String lower = s.toLowerCase(Locale.US);
+        boolean pm = lower.contains("pm");
+        boolean am = lower.contains("am");
+        List<Integer> nums = new ArrayList<>();
+        for (String tok : lower.replace(":", " ").split("\\s+")) {
+            if (tok.matches("\\d+")) {
+                nums.add(Integer.parseInt(tok));
+            } else if (NUMBERS.containsKey(tok)) {
+                nums.add(NUMBERS.get(tok));
+            }
+        }
+        if (nums.isEmpty()) return null;
+        int hour = nums.get(0);
+        int minute = nums.size() > 1 ? nums.get(1) : 0;
+        if (hour > 23 || minute > 59) return null;
+        if (pm && hour < 12) hour += 12;
+        if (am && hour == 12) hour = 0;
+        return new int[]{hour, minute};
     }
 
     private static String calc(String expr) {
@@ -530,6 +629,16 @@ public class OfflineTools {
         }
     }
 
+    private static String joinWord(String rest) {
+        String r = rest.trim();
+        String[] t = r.split("\\s+");
+        boolean letters = t.length > 1;
+        for (String x : t) {
+            if (x.length() != 1) letters = false;
+        }
+        return letters ? String.join("", t) : r;
+    }
+
     private static String shopping(Context c, String rest) {
         try {
             if (rest.startsWith("add ")) {
@@ -617,6 +726,28 @@ public class OfflineTools {
         return "You spent " + fmt(sum) + " " + scope + " across " + count + " items.";
     }
 
+    private static String expensesByItem(Context c) {
+        Map<String, Double> sums = new HashMap<>();
+        for (String l : fileLines(c, "expenses.txt")) {
+            String[] p = l.split("\\|", 3);
+            if (p.length < 3) continue;
+            try {
+                sums.merge(p[2], Double.parseDouble(p[1]), Double::sum);
+            } catch (NumberFormatException e) {
+                // skip bad lines
+            }
+        }
+        if (sums.isEmpty()) return "You have no expenses saved yet.";
+        List<Map.Entry<String, Double>> entries = new ArrayList<>(sums.entrySet());
+        entries.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+        StringBuilder sb = new StringBuilder("Your top spending. ");
+        for (int i = 0; i < Math.min(5, entries.size()); i++) {
+            Map.Entry<String, Double> e = entries.get(i);
+            sb.append(e.getKey()).append(": ").append(fmt(e.getValue())).append(". ");
+        }
+        return sb.toString();
+    }
+
     private static int streak(List<String> lines, String name) {
         Set<String> days = new HashSet<>();
         for (String l : lines) {
@@ -662,6 +793,83 @@ public class OfflineTools {
             sb.append(n).append(": streak ").append(streak(lines, n)).append(" days. ");
         }
         return sb.toString();
+    }
+
+    private static String setHabitRemind(Context c, String rest) {
+        int idx = rest.indexOf(" at ");
+        String usage = "Say tool remind habit, then the habit, then at, then a time, like remind habit water at 9 pm.";
+        if (idx < 0) return usage;
+        String name = rest.substring(0, idx).trim().toLowerCase(Locale.US);
+        int[] t = parseClock(rest.substring(idx + 4));
+        if (name.isEmpty() || t == null) return usage;
+        String hm = String.format(Locale.US, "%02d:%02d", t[0], t[1]);
+        try {
+            appendFile(c, "habit_reminders.txt", hm + "|" + name);
+        } catch (IOException e) {
+            return "I could not save that reminder.";
+        }
+        return "I will remind you about " + name + " at " + hm + " each day, until it is logged.";
+    }
+
+    private static String habitReminders(Context c) {
+        List<String> lines = fileLines(c, "habit_reminders.txt");
+        if (lines.isEmpty()) return "You have no habit reminders. Say tool remind habit water at 9 am.";
+        StringBuilder sb = new StringBuilder("Your habit reminders. ");
+        for (String l : lines) {
+            String[] p = l.split("\\|", 2);
+            if (p.length == 2) sb.append(p[1]).append(" at ").append(p[0]).append(". ");
+        }
+        return sb.toString();
+    }
+
+    private static String stopHabitRemind(Context c, String name) {
+        String n = name.toLowerCase(Locale.US).trim();
+        List<String> lines = fileLines(c, "habit_reminders.txt");
+        List<String> kept = new ArrayList<>();
+        boolean removed = false;
+        for (String l : lines) {
+            String[] p = l.split("\\|", 2);
+            if (p.length == 2 && p[1].equals(n)) {
+                removed = true;
+            } else {
+                kept.add(l);
+            }
+        }
+        if (!removed) return "I did not find a reminder for " + n + ".";
+        try {
+            writeFile(c, "habit_reminders.txt", kept);
+        } catch (IOException e) {
+            return "I could not update the reminders.";
+        }
+        return "Stopped the reminder for " + n + ".";
+    }
+
+    private static void checkDailyUpdate() {
+        if (appCtx == null) return;
+        List<String> lines = fileLines(appCtx, "daily_update.txt");
+        if (lines.isEmpty()) return;
+        String hm = lines.get(0);
+        String day = today();
+        if (nowHm().equals(hm) && !day.equals(lastDailyDay)) {
+            lastDailyDay = day;
+            speakOut(appCtx, "Daily update. " + timeText() + " " + dateText() + " " + battery(appCtx));
+        }
+    }
+
+    private static void checkHabitReminders() {
+        if (appCtx == null) return;
+        String now = nowHm();
+        String day = today();
+        List<String> logged = fileLines(appCtx, "habits.txt");
+        for (String l : fileLines(appCtx, "habit_reminders.txt")) {
+            String[] p = l.split("\\|", 2);
+            if (p.length != 2 || !p[0].equals(now)) continue;
+            String name = p[1];
+            String key = day + "|" + name;
+            if (FIRED.contains(key) || logged.contains(key)) continue;
+            FIRED.add(key);
+            speakOut(appCtx, "Time for your habit: " + name + ". Say tool habit " + name + " to log it.");
+        }
     }
 
     private static String elapsedText(long secs) {
@@ -931,5 +1139,20 @@ public class OfflineTools {
         int count = text.trim().split("\\s+").length;
         return "That has " + count + (count == 1 ? " word." : " words.");
     }
-}    
 
+    private static String dailyUpdateSet(Context c, String rest) {
+        if (rest.equals("off")) {
+            new File(c.getFilesDir(), "daily_update.txt").delete();
+            return "Daily update is off.";
+        }
+        int[] t = parseClock(rest);
+        if (t == null) return "Say tool daily update at, then a time, like daily update at 7 30 am.";
+        String hm = String.format(Locale.US, "%02d:%02d", t[0], t[1]);
+        try {
+            writeFile(c, "daily_update.txt", Arrays.asList(hm));
+        } catch (IOException e) {
+            return "I could not save the daily update.";
+        }
+        return "Daily update set for " + hm + ". I will speak the time, date, and battery each day.";
+    }
+}
