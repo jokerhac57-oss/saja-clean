@@ -55,6 +55,7 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -62,6 +63,7 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -120,6 +122,8 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private boolean wasHome = false;
     private boolean batteryAlerted = false;
     private String lastBriefingDay = "";
+    private String lastBillDay = "";
+    private Runnable waterTask = null;
 
     private final Runnable everyMinute = new Runnable() {
         @Override
@@ -127,6 +131,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
             checkHome();
             checkBriefing();
             checkBattery();
+            checkBills();
             handler.postDelayed(this, 60000);
         }
     };
@@ -286,6 +291,16 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return readStream(c.getInputStream());
     }
 
+    private String httpGetAgent(String url) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestProperty("User-Agent", "SAJA-Android/1.0 (personal assistant)");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(30000);
+        int code = c.getResponseCode();
+        if (code >= 400) throw new IOException("the site returned " + code);
+        return readStream(c.getInputStream());
+    }
+
     private String saveNote(String text) {
         if (text.isEmpty()) return "Say note, then what to save.";
         try {
@@ -338,6 +353,88 @@ public class ListenService extends Service implements RecognitionListener, TextT
         return text.length() > 3000 ? text.substring(text.length() - 3000) : text;
     }
 
+    private String readDocument() throws IOException {
+        String raw = readFileText("doc_uri.txt");
+        if (raw.isEmpty()) return null;
+        Uri uri = Uri.parse(raw);
+        StringBuilder sb = new StringBuilder();
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+            String line;
+            while ((line = r.readLine()) != null && sb.length() < 6000) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private void askDocument(String question) {
+        askApproval("Send your document to the model? This uses OpenRouter credits.", () -> {
+            try {
+                String doc = readDocument();
+                if (doc == null || doc.trim().isEmpty()) {
+                    replyLater("I could not read the document. Pick one with PICK DOCUMENT in the SAJA app.");
+                    return;
+                }
+                runModel("Answer using only this document. If the answer is not in it, say so.\n\nDocument:\n"
+                        + doc + "\n\nQuestion: " + question);
+            } catch (IOException e) {
+                replyLater("I could not read the document.");
+            }
+        });
+    }
+
+    private void runResearch(String topic) {
+        handler.post(() -> showText("Searching Wikipedia..."));
+        new Thread(() -> {
+            try {
+                String q = URLEncoder.encode(topic, "UTF-8").replace("+", "%20");
+                String searchRaw = httpGetAgent("https://en.wikipedia.org/w/api.php?action=query&list=search&srlimit=3&format=json&srsearch=" + q);
+                JSONArray hits = new JSONObject(searchRaw).getJSONObject("query").getJSONArray("search");
+                if (hits.length() == 0) {
+                    replyLater("I found no Wikipedia pages for " + topic + ".");
+                    return;
+                }
+                StringBuilder context = new StringBuilder();
+                StringBuilder links = new StringBuilder();
+                StringBuilder titles = new StringBuilder();
+                for (int i = 0; i < hits.length(); i++) {
+                    String title = hits.getJSONObject(i).getString("title");
+                    String t = URLEncoder.encode(title, "UTF-8").replace("+", "%20");
+                    String extRaw = httpGetAgent("https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&format=json&titles=" + t);
+                    JSONObject pages = new JSONObject(extRaw).getJSONObject("query").getJSONObject("pages");
+                    String extract = "";
+                    Iterator<String> keys = pages.keys();
+                    if (keys.hasNext()) extract = pages.getJSONObject(keys.next()).optString("extract", "");
+                    if (extract.length() > 1500) extract = extract.substring(0, 1500);
+                    String url = "https://en.wikipedia.org/wiki/" + title.replace(' ', '_');
+                    context.append("[").append(i + 1).append("] ").append(title).append(": ").append(extract).append("\n\n");
+                    links.append(title).append(": ").append(url).append("\n");
+                    if (i > 0) titles.append(", ");
+                    titles.append(title);
+                }
+                String prompt = "Answer the question about \"" + topic + "\" using only these sources. "
+                        + "Be brief, three to four sentences. Mention source numbers like [1] where useful.\n\nSources:\n" + context;
+                String answer = callModel(prompt).replace("*", "").replace("#", "").trim();
+                if (answer.isEmpty()) answer = "No reply.";
+                final String shown = answer + "\n\nSources:\n" + links;
+                final String spoken = answer + " Sources: " + titles + ".";
+                handler.post(() -> {
+                    showText(shown);
+                    speak(spoken);
+                });
+                try {
+                    ChatHistory.save(this, "research " + topic, answer);
+                } catch (IOException e) {
+                    // saving history is optional
+                }
+            } catch (Exception e) {
+                replyLater("Research failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
     private String rememberFact(String fact) {
         if (fact.isEmpty()) return "Say remember, then what to remember.";
         try {
@@ -384,7 +481,7 @@ public class ListenService extends Service implements RecognitionListener, TextT
                 || step.startsWith("delete ") || step.startsWith("read ") || step.startsWith("tap ")
                 || step.startsWith("type ") || step.startsWith("tool ") || step.startsWith("look")
                 || step.startsWith("automate") || step.startsWith("draft ") || step.startsWith("improve ")
-                || step.startsWith("summarize ")) {
+                || step.startsWith("summarize ") || step.startsWith("research ") || step.startsWith("document ")) {
             return false;
         }
         for (String s : SAFE_STEPS) {
@@ -574,6 +671,63 @@ public class ListenService extends Service implements RecognitionListener, TextT
                 ? NotificationManager.INTERRUPTION_FILTER_PRIORITY
                 : NotificationManager.INTERRUPTION_FILTER_ALL);
         return on ? "Focus mode is on. Only priority alerts will ring." : "Focus mode is off.";
+    }
+
+    private String startFocus(final int minutes) {
+        handler.postDelayed(() -> {
+            reply("Focus session done. Take a short break.");
+            try {
+                Extras.focusDone(this);
+            } catch (IOException e) {
+                // counting is optional
+            }
+        }, minutes * 60000L);
+        return "Focus session of " + minutes + " minutes started. I will tell you when it ends.";
+    }
+
+    private void startWater(final int hours) {
+        stopWater();
+        final Runnable[] holder = new Runnable[1];
+        holder[0] = () -> {
+            reply("Time to drink some water.");
+            handler.postDelayed(holder[0], hours * 3600000L);
+        };
+        waterTask = holder[0];
+        handler.postDelayed(waterTask, hours * 3600000L);
+    }
+
+    private void stopWater() {
+        if (waterTask != null) {
+            handler.removeCallbacks(waterTask);
+            waterTask = null;
+        }
+    }
+
+    private void checkBills() {
+        String nowHm = new SimpleDateFormat("HH:mm", Locale.US).format(new Date());
+        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+        if (!nowHm.equals("09:00") || today.equals(lastBillDay)) return;
+        lastBillDay = today;
+        Calendar cal = Calendar.getInstance();
+        int todayDay = cal.get(Calendar.DAY_OF_MONTH);
+        cal.add(Calendar.DAY_OF_MONTH, 1);
+        int tomorrowDay = cal.get(Calendar.DAY_OF_MONTH);
+        StringBuilder sb = new StringBuilder();
+        for (String l : readLines(new File(getFilesDir(), "bills.txt"))) {
+            String[] p = l.split("\\|", 3);
+            if (p.length < 3) continue;
+            try {
+                int day = Integer.parseInt(p[0].trim());
+                if (day == todayDay) {
+                    sb.append(p[2]).append(" for ").append(p[1]).append(" is due today. ");
+                } else if (day == tomorrowDay) {
+                    sb.append(p[2]).append(" for ").append(p[1]).append(" is due tomorrow. ");
+                }
+            } catch (NumberFormatException e) {
+                // skip bad lines
+            }
+        }
+        if (sb.length() > 0) reply("Bill reminder. " + sb);
     }
 
     private void checkBattery() {
@@ -1224,8 +1378,78 @@ public class ListenService extends Service implements RecognitionListener, TextT
     private String answerFor(String command) {
         if (command.isEmpty()) return "Yes, I am here.";
 
+        if (command.startsWith("focus ") && command.contains("minute")) {
+            List<Integer> fm = numbersIn(command);
+            if (fm.isEmpty()) return "Say focus, then the minutes, like focus 25 minutes.";
+            return startFocus(Math.min(120, Math.max(1, fm.get(0))));
+        }
+        if (command.equals("focus count") || command.equals("focus sessions")) {
+            return Extras.focusCount(this);
+        }
+        if (command.startsWith("remind me to drink water") || command.startsWith("water reminder")) {
+            List<Integer> wh = numbersIn(command);
+            if (wh.isEmpty()) return "Say water reminder every, then the hours, like every 2 hours.";
+            int hours = Math.min(12, Math.max(1, wh.get(0)));
+            startWater(hours);
+            return "I will remind you to drink water every " + hours
+                    + " hours until you say stop water reminders. This resets if SAJA restarts.";
+        }
+        if (command.equals("stop water reminders") || command.equals("stop water")) {
+            stopWater();
+            return "Water reminders are off.";
+        }
+        if (command.startsWith("goal ")) return Extras.goal(this, command.substring(5).trim());
+        if (command.equals("goals")) return Extras.goals(this);
+        if (command.startsWith("slept ")) return Extras.sleep(this, command.substring(6).trim());
+        if (command.equals("sleep week")) return Extras.sleepWeek(this);
+        if (command.startsWith("emergency set ")) return Extras.emergencySet(this, command.substring(14).trim());
+        if (command.equals("emergency card")) {
+            askApproval("Read your emergency card aloud?", () -> reply(Extras.emergencyRead(this)));
+            return null;
+        }
+        if (command.equals("quote")) {
+            new Thread(() -> replyLater(Extras.quote())).start();
+            return null;
+        }
+        if (command.startsWith("practice check ")) {
+            final String text = command.substring(15).trim();
+            askApproval("Send your Spanish to the model to check?", () -> runModel(
+                    "Check this Spanish sentence. Say whether it is correct, then give the corrected version in one short line: " + text));
+            return null;
+        }
+        if (command.equals("practice spanish") || command.equals("practice")) {
+            askApproval("Get a Spanish practice sentence from the model?", () -> runModel(
+                    "Give one short everyday English sentence for a beginner to translate into Spanish. Reply with only the sentence."));
+            return null;
+        }
+        if (command.equals("dinner ideas") || command.equals("meal ideas")) {
+            final String items = Extras.shoppingItems(this);
+            if (items.isEmpty()) return "Your shopping list is empty. Add items with tool shopping add first.";
+            askApproval("Send your shopping list to the model for dinner ideas?", () -> runModel(
+                    "Suggest three simple dinner ideas using these items where possible. Keep it short: " + items));
+            return null;
+        }
+
         if (command.startsWith("automate ")) {
             runAutomation(command.substring(9).trim());
+            return null;
+        }
+
+        if (command.startsWith("research ")) {
+            final String topic = command.substring(9).trim();
+            if (topic.isEmpty()) return "Say research, then the topic.";
+            askApproval("Search Wikipedia for " + topic + " and summarize it with sources?", () -> runResearch(topic));
+            return null;
+        }
+
+        if (command.startsWith("document ") || command.startsWith("ask document ")) {
+            String q = command.replaceFirst("^(ask )?document ", "").trim();
+            if (q.isEmpty()) return "Say ask document, then your question.";
+            askDocument(q);
+            return null;
+        }
+        if (command.equals("summarize document") || command.equals("summarize my document")) {
+            askDocument("Summarize this document in five short sentences.");
             return null;
         }
 
@@ -1499,7 +1723,13 @@ public class ListenService extends Service implements RecognitionListener, TextT
             }
             return sb.length() == 0 ? "Say spell, then a word." : sb.toString().trim() + ".";
         }
-        return "I heard " + command + ". I cannot answer that yet.";
+
+        // Catch-all brain: anything else goes to the free model after a yes.
+        final String prompt = memoryContext()
+                + "Answer this briefly and clearly in plain text, for a phone assistant. "
+                + "Keep it under four sentences unless the question needs more: " + command;
+        askApproval("Send this question to the model?", () -> runModel(prompt));
+        return null;
     }
 
     private void handleText(String heard) {
