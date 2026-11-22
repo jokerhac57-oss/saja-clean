@@ -46,7 +46,10 @@
         </intent>
     </queries>
 
-    <application android:label="SAJA" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+    <application
+        android:label="SAJA"
+        android:icon="@drawable/ic_saja"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
