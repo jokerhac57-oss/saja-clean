@@ -6,6 +6,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Bundle;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -107,5 +108,37 @@ public class ScreenHelper extends AccessibilityService {
         target.recycle();
         root.recycle();
         return result;
+    }
+
+    public static String typeText(String text) {
+        if (instance == null) return "Turn on SAJA screen helper in Accessibility settings first.";
+        AccessibilityNodeInfo root = instance.getRootInActiveWindow();
+        if (root == null) return "I cannot see the screen right now.";
+        AccessibilityNodeInfo target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (target == null) target = findEditable(root);
+        if (target == null) {
+            root.recycle();
+            return "I cannot find a text box. Tap the text box first.";
+        }
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        boolean ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        target.recycle();
+        root.recycle();
+        return ok ? "Typed the text." : "I could not type into that box.";
+    }
+
+    private static AccessibilityNodeInfo findEditable(AccessibilityNodeInfo node) {
+        if (node == null) return null;
+        if (node.isEditable()) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                AccessibilityNodeInfo found = findEditable(child);
+                if (found != null) return found;
+                child.recycle();
+            }
+        }
+        return null;
     }
 }
