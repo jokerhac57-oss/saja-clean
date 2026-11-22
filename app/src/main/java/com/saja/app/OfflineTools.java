@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.provider.CalendarContract;
 
@@ -23,24 +24,43 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class OfflineTools {
     private static final String[] NAMES = {"battery", "time", "date", "notes", "memory",
             "notifications", "history", "usage", "calendar", "calc", "convert", "currency",
-            "headlines", "define", "shopping", "days until"};
+            "headlines", "define", "shopping", "days until", "spent", "expenses", "habit", "habits",
+            "stopwatch", "tip", "qr", "time in", "quiz", "quiz answer", "fact"};
 
     private static final Map<String, Integer> NUMBERS = new HashMap<>();
     private static final Map<String, Double> LENGTH = new HashMap<>();
     private static final Map<String, Double> WEIGHT = new HashMap<>();
+    private static final Map<String, String> ZONES = new HashMap<>();
+    private static final String[] FACTS = {
+            "Honey found in ancient Egyptian tombs can still be eaten, because honey almost never spoils.",
+            "Octopuses have three hearts and blue blood.",
+            "Bananas are botanically berries, but strawberries are not.",
+            "Nepal's flag is the only national flag that is not a four-sided shape.",
+            "Lightning can be about five times hotter than the surface of the sun.",
+            "Wombats produce cube-shaped droppings."
+    };
+    private static final Random RANDOM = new Random();
     private static String src = "";
     private static int pos = 0;
 
@@ -70,6 +90,21 @@ public class OfflineTools {
         WEIGHT.put("kilogram", 1000.0); WEIGHT.put("kilograms", 1000.0);
         WEIGHT.put("lb", 453.592); WEIGHT.put("lbs", 453.592); WEIGHT.put("pound", 453.592); WEIGHT.put("pounds", 453.592);
         WEIGHT.put("oz", 28.3495); WEIGHT.put("ounce", 28.3495); WEIGHT.put("ounces", 28.3495);
+
+        ZONES.put("tokyo", "Asia/Tokyo");
+        ZONES.put("london", "Europe/London");
+        ZONES.put("new york", "America/New_York");
+        ZONES.put("kathmandu", "Asia/Kathmandu");
+        ZONES.put("dubai", "Asia/Dubai");
+        ZONES.put("sydney", "Australia/Sydney");
+        ZONES.put("paris", "Europe/Paris");
+        ZONES.put("los angeles", "America/Los_Angeles");
+        ZONES.put("delhi", "Asia/Kolkata");
+        ZONES.put("beijing", "Asia/Shanghai");
+        ZONES.put("berlin", "Europe/Berlin");
+        ZONES.put("chicago", "America/Chicago");
+        ZONES.put("singapore", "Asia/Singapore");
+        ZONES.put("toronto", "America/Toronto");
     }
 
     public static String list() {
@@ -92,14 +127,64 @@ public class OfflineTools {
         if (in.equals("history")) return history(c);
         if (in.equals("usage")) return ChatHistory.usageText(c);
         if (in.equals("calendar")) return calendar(c);
+        if (in.equals("headlines")) return headlines();
+        if (in.equals("habits")) return habits(c);
+        if (in.equals("stopwatch")) return stopwatch(c, "");
+        if (in.equals("quiz answer")) return quizAnswer(c);
+        if (in.equals("quiz")) return quiz(c);
+        if (in.equals("fact")) return FACTS[RANDOM.nextInt(FACTS.length)];
+        if (in.equals("expenses")) return expenses(c, false);
+        if (in.equals("expenses today")) return expenses(c, true);
         if (in.startsWith("calc ")) return calc(in.substring(5));
         if (in.startsWith("convert ")) return convert(in.substring(8));
         if (in.startsWith("currency ")) return currency(in.substring(9));
-        if (in.equals("headlines")) return headlines();
         if (in.startsWith("define ")) return define(in.substring(7).trim());
         if (in.startsWith("shopping")) return shopping(c, in.substring(8).trim());
         if (in.startsWith("days until ")) return daysUntil(in.substring(11).trim());
+        if (in.startsWith("spent ")) return spent(c, in.substring(6).trim());
+        if (in.startsWith("habit ")) return logHabit(c, in.substring(6).trim());
+        if (in.startsWith("stopwatch ")) return stopwatch(c, in.substring(10).trim());
+        if (in.startsWith("tip ")) return tip(in.substring(4).trim());
+        if (in.startsWith("qr ")) return qr(c, in.substring(3).trim());
+        if (in.startsWith("time in ")) return timeIn(in.substring(8).trim());
         return null;
+    }
+
+    private static String today() {
+        return dayOffset(0);
+    }
+
+    private static String dayOffset(int days) {
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_YEAR, -days);
+        return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(cal.getTime());
+    }
+
+    private static List<String> fileLines(Context c, String name) {
+        List<String> out = new ArrayList<>();
+        File f = new File(c.getFilesDir(), name);
+        if (!f.exists()) return out;
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String l;
+            while ((l = r.readLine()) != null) {
+                if (!l.trim().isEmpty()) out.add(l.trim());
+            }
+        } catch (IOException e) {
+            // return what was read
+        }
+        return out;
+    }
+
+    private static void appendFile(Context c, String name, String line) throws IOException {
+        try (FileWriter w = new FileWriter(new File(c.getFilesDir(), name), true)) {
+            w.write(line + "\n");
+        }
+    }
+
+    private static void writeFile(Context c, String name, List<String> lines) throws IOException {
+        try (FileWriter w = new FileWriter(new File(c.getFilesDir(), name))) {
+            for (String l : lines) w.write(l + "\n");
+        }
     }
 
     private static String battery(Context c) {
@@ -114,23 +199,8 @@ public class OfflineTools {
         return "Battery is " + pct + " percent" + (charging ? ", charging." : ".");
     }
 
-    private static List<String> lines(Context c, String file) {
-        List<String> out = new ArrayList<>();
-        File f = new File(c.getFilesDir(), file);
-        if (!f.exists()) return out;
-        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
-            String l;
-            while ((l = r.readLine()) != null) {
-                if (!l.trim().isEmpty()) out.add(l);
-            }
-        } catch (IOException e) {
-            // return what was read
-        }
-        return out;
-    }
-
     private static String lastParts(Context c, String file, int count, String prefix, String empty) {
-        List<String> all = lines(c, file);
+        List<String> all = fileLines(c, file);
         if (all.isEmpty()) return empty;
         StringBuilder sb = new StringBuilder(prefix);
         for (int i = Math.max(0, all.size() - count); i < all.size(); i++) {
@@ -187,6 +257,36 @@ public class OfflineTools {
     private static String fmt(double v) {
         if (v == Math.rint(v) && Math.abs(v) < 1e15) return String.valueOf((long) v);
         return String.format(Locale.US, "%.2f", v);
+    }
+
+    private static boolean isNumToken(String t) {
+        return t.matches("[0-9]+(\\.[0-9]+)?") || NUMBERS.containsKey(t)
+                || t.equals("hundred") || t.equals("thousand");
+    }
+
+    private static Double parseNumber(List<String> tokens) {
+        double total = 0;
+        double current = 0;
+        boolean any = false;
+        for (String t : tokens) {
+            if (t.matches("[0-9]+(\\.[0-9]+)?")) {
+                current += Double.parseDouble(t);
+                any = true;
+            } else if (NUMBERS.containsKey(t)) {
+                current += NUMBERS.get(t);
+                any = true;
+            } else if (t.equals("hundred")) {
+                current = (current == 0 ? 1 : current) * 100;
+                any = true;
+            } else if (t.equals("thousand")) {
+                total += (current == 0 ? 1 : current) * 1000;
+                current = 0;
+                any = true;
+            } else {
+                break;
+            }
+        }
+        return any ? total + current : null;
     }
 
     private static String calc(String expr) {
@@ -418,26 +518,15 @@ public class OfflineTools {
     }
 
     private static String shopping(Context c, String rest) {
-        File f = new File(c.getFilesDir(), "shopping.txt");
         try {
             if (rest.startsWith("add ")) {
                 String item = rest.substring(4).trim();
                 if (item.isEmpty()) return "Say shopping add, then the item.";
-                try (FileWriter w = new FileWriter(f, true)) {
-                    w.write(item + "\n");
-                }
+                appendFile(c, "shopping.txt", item);
                 return "Added " + item + " to your shopping list.";
             }
             if (rest.isEmpty() || rest.equals("list")) {
-                List<String> items = new ArrayList<>();
-                if (f.exists()) {
-                    try (BufferedReader r = new BufferedReader(new FileReader(f))) {
-                        String l;
-                        while ((l = r.readLine()) != null) {
-                            if (!l.trim().isEmpty()) items.add(l.trim());
-                        }
-                    }
-                }
+                List<String> items = fileLines(c, "shopping.txt");
                 if (items.isEmpty()) return "Your shopping list is empty.";
                 StringBuilder sb = new StringBuilder("Your shopping list has " + items.size() + " items. ");
                 for (String i : items) sb.append(i).append(". ");
@@ -473,4 +562,200 @@ public class OfflineTools {
         if (days == 0) return "That is today.";
         return days + " days until " + s.trim() + ".";
     }
-}
+
+    private static String spent(Context c, String rest) {
+        List<String> tokens = Arrays.asList(rest.toLowerCase(Locale.US).split("\\s+"));
+        List<String> nums = new ArrayList<>();
+        int i = 0;
+        while (i < tokens.size() && isNumToken(tokens.get(i))) {
+            nums.add(tokens.get(i));
+            i++;
+        }
+        Double amount = parseNumber(nums);
+        if (amount == null) return "Say tool spent, then an amount, like spent twelve on lunch.";
+        if (i < tokens.size() && tokens.get(i).equals("on")) i++;
+        String item = i < tokens.size() ? String.join(" ", tokens.subList(i, tokens.size())).trim() : "";
+        if (item.isEmpty()) item = "misc";
+        try {
+            appendFile(c, "expenses.txt", today() + "|" + fmt(amount) + "|" + item);
+        } catch (IOException e) {
+            return "I could not save that expense.";
+        }
+        return "Saved " + fmt(amount) + " for " + item + ".";
+    }
+
+    private static String expenses(Context c, boolean todayOnly) {
+        double sum = 0;
+        int count = 0;
+        String day = today();
+        for (String l : fileLines(c, "expenses.txt")) {
+            String[] p = l.split("\\|", 3);
+            if (p.length < 3) continue;
+            if (todayOnly && !p[0].equals(day)) continue;
+            try {
+                sum += Double.parseDouble(p[1]);
+                count++;
+            } catch (NumberFormatException e) {
+                // skip bad lines
+            }
+        }
+        String scope = todayOnly ? "today" : "in total";
+        if (count == 0) return "You have no expenses " + scope + ".";
+        return "You spent " + fmt(sum) + " " + scope + " across " + count + " items.";
+    }
+
+    private static int streak(List<String> lines, String name) {
+        Set<String> days = new HashSet<>();
+        for (String l : lines) {
+            String[] p = l.split("\\|", 2);
+            if (p.length == 2 && p[1].equals(name)) days.add(p[0]);
+        }
+        int count = 0;
+        int d = days.contains(dayOffset(0)) ? 0 : 1;
+        while (days.contains(dayOffset(d))) {
+            count++;
+            d++;
+        }
+        return count;
+    }
+
+    private static String logHabit(Context c, String name) {
+        String n = name.toLowerCase(Locale.US).trim();
+        if (n.isEmpty()) return "Say tool habit, then the habit, like habit water.";
+        List<String> lines = fileLines(c, "habits.txt");
+        String todayLine = today() + "|" + n;
+        if (lines.contains(todayLine)) {
+            return n + " is already logged today. Streak " + streak(lines, n) + " days.";
+        }
+        try {
+            appendFile(c, "habits.txt", todayLine);
+        } catch (IOException e) {
+            return "I could not save that habit.";
+        }
+        lines.add(todayLine);
+        return "Logged " + n + " for today. Streak " + streak(lines, n) + " days.";
+    }
+
+    private static String habits(Context c) {
+        List<String> lines = fileLines(c, "habits.txt");
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        for (String l : lines) {
+            String[] p = l.split("\\|", 2);
+            if (p.length == 2) names.add(p[1]);
+        }
+        if (names.isEmpty()) return "You have no habits yet. Say tool habit water to start one.";
+        StringBuilder sb = new StringBuilder("Your habits. ");
+        for (String n : names) {
+            sb.append(n).append(": streak ").append(streak(lines, n)).append(" days. ");
+        }
+        return sb.toString();
+    }
+
+    private static String elapsedText(long secs) {
+        long m = secs / 60;
+        long s = secs % 60;
+        return m + (m == 1 ? " minute" : " minutes") + " and " + s + (s == 1 ? " second" : " seconds");
+    }
+
+    private static String stopwatch(Context c, String arg) {
+        try {
+            if (arg.equals("start")) {
+                if (new File(c.getFilesDir(), "stopwatch.txt").exists()) return "The stopwatch is already running.";
+                appendFile(c, "stopwatch.txt", String.valueOf(System.currentTimeMillis()));
+                writeFile(c, "stopwatch.txt", Arrays.asList(String.valueOf(System.currentTimeMillis())));
+                return "Stopwatch started.";
+            }
+            List<String> saved = fileLines(c, "stopwatch.txt");
+            if (saved.isEmpty()) return "The stopwatch is not running. Say tool stopwatch start.";
+            long start = Long.parseLong(saved.get(0));
+            long secs = (System.currentTimeMillis() - start) / 1000;
+            if (arg.equals("stop")) {
+                new File(c.getFilesDir(), "stopwatch.txt").delete();
+                return "Stopped at " + elapsedText(secs) + ".";
+            }
+            return "Elapsed time is " + elapsedText(secs) + ".";
+        } catch (Exception e) {
+            return "I could not use the stopwatch.";
+        }
+    }
+
+    private static String tip(String s) {
+        String lower = s.toLowerCase(Locale.US).replace("%", " ").replace("percent", " ")
+                .replace("dollars", " ").replace("dollar", " ")
+                .replace("rupees", " ").replace("rupee", " ");
+        String[] parts = lower.trim().split("\\s+at\\s+", 2);
+        List<String> amountTokens = new ArrayList<>();
+        for (String t : parts[0].trim().split("\\s+")) {
+            if (isNumToken(t)) amountTokens.add(t);
+        }
+        Double amount = parseNumber(amountTokens);
+        if (amount == null) return "Say tool tip, then the amount, like tip 45 at 15 percent.";
+        double pct = 15;
+        if (parts.length > 1) {
+            List<String> pctTokens = new ArrayList<>();
+            for (String t : parts[1].trim().split("\\s+")) {
+                if (isNumToken(t)) pctTokens.add(t);
+            }
+            Double p = parseNumber(pctTokens);
+            if (p != null) pct = p;
+        }
+        double tipAmount = amount * pct / 100.0;
+        return "Tip is " + fmt(tipAmount) + ". Total is " + fmt(amount + tipAmount)
+                + " with a " + fmt(pct) + " percent tip.";
+    }
+
+    private static String qr(Context c, String text) {
+        if (text.isEmpty()) return "Say tool qr, then the text, like qr my website dot com.";
+        try {
+            String clean = text.replace(" dot ", ".").replace(" ", "");
+            String url = "https://api.qrserver.com/v1/create-qr-code/?size=400x400&data="
+                    + URLEncoder.encode(clean, "UTF-8");
+            c.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return "Showing a QR code for " + clean + " in your browser.";
+        } catch (Exception e) {
+            return "I could not open the QR code.";
+        }
+    }
+
+    private static String timeIn(String place) {
+        String zone = ZONES.get(place.toLowerCase(Locale.US).trim());
+        if (zone == null) return "I do not know the time zone for " + place + " yet.";
+        String t = ZonedDateTime.now(ZoneId.of(zone))
+                .format(DateTimeFormatter.ofPattern("h:mm a, EEEE, MMMM d", Locale.US));
+        return "In " + place + " it is " + t + ".";
+    }
+
+    private static String quiz(Context c) {
+        List<String> candidates = new ArrayList<>();
+        for (String l : fileLines(c, "notes.txt")) {
+            String[] p = l.split("\\|", 2);
+            String text = p.length == 2 ? p[1] : l;
+            if (text.trim().split("\\s+").length >= 4) candidates.add(text.trim());
+        }
+        if (candidates.isEmpty()) return "Save a few notes first with say note, then quiz me.";
+        String text = candidates.get(RANDOM.nextInt(candidates.size()));
+        String[] words = text.split("\\s+");
+        List<Integer> options = new ArrayList<>();
+        for (int i = 0; i < words.length; i++) {
+            if (words[i].replaceAll("[^A-Za-z]", "").length() > 3) options.add(i);
+        }
+        if (options.isEmpty()) return "Save a longer note for a quiz.";
+        int pick = options.get(RANDOM.nextInt(options.size()));
+        String answer = words[pick].replaceAll("[^A-Za-z0-9]", "");
+        words[pick] = "blank";
+        try {
+            writeFile(c, "quiz_answer.txt", Arrays.asList(answer));
+        } catch (IOException e) {
+            return "I could not start the quiz.";
+        }
+        return "Fill in the blank. " + String.join(" ", words) + ". Say tool quiz answer to check.";
+    }
+
+    private static String quizAnswer(Context c) {
+        List<String> saved = fileLines(c, "quiz_answer.txt");
+        if (saved.isEmpty()) return "Ask me a quiz first. Say tool quiz.";
+        return "The answer is " + saved.get(0) + ".";
+    }
+}    
+
+                        
