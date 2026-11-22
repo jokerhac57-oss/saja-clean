@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
     private static final int REQ_LOCATION = 3;
     private static final int REQ_CALENDAR = 4;
     private static final int REQ_CAMERA = 5;
+    private static final int REQ_DOC = 6;
     private static final int CYAN = 0xFF00E5FF;
     private static final int PANEL = 0xFF0B1A24;
     private static final int BLACK = 0xFF05070A;
@@ -68,6 +69,7 @@ public class MainActivity extends Activity {
         box.addView(button("SAVE GITHUB TOKEN", v -> saveSecret("github.token", githubBox.getText().toString().trim(), "GitHub token")));
 
         box.addView(button("TAKE PHOTO", v -> { pendingLook = null; launchCamera(); }));
+        box.addView(button("PICK DOCUMENT", v -> pickDocument()));
         box.addView(button("ALLOW CONTACTS", v -> requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQ_CONTACTS)));
         box.addView(button("ALLOW LOCATION (HOME WI-FI)", v -> requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION)));
         box.addView(button("ALLOW CALENDAR", v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CALENDAR)));
@@ -113,6 +115,36 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void pickDocument() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/*");
+        try {
+            startActivityForResult(i, REQ_DOC);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No file picker found", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void saveDocument(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            Toast.makeText(this, "No document picked", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Uri uri = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception e) {
+            // some pickers do not allow saved access; reading may still work
+        }
+        try (FileOutputStream out = new FileOutputStream(new File(getFilesDir(), "doc_uri.txt"))) {
+            out.write(uri.toString().getBytes(StandardCharsets.UTF_8));
+            Toast.makeText(this, "Document saved. Say ask document, then your question.", Toast.LENGTH_LONG).show();
+        } catch (IOException e) {
+            Toast.makeText(this, "Could not remember the document", Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void launchCamera() {
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         ContentValues values = new ContentValues();
@@ -143,6 +175,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_DOC) {
+            saveDocument(resultCode, data);
+            return;
+        }
         if (requestCode != REQ_CAMERA) return;
         if (resultCode == RESULT_OK && pendingLook != null) {
             Intent svc = new Intent(this, ListenService.class)
@@ -197,4 +233,4 @@ public class MainActivity extends Activity {
             Toast.makeText(this, granted ? "Calendar allowed" : "Calendar not allowed", Toast.LENGTH_SHORT).show();
         }
     }
-}
+}                    
